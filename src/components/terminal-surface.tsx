@@ -161,8 +161,12 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
         return false
       }
-      if (!isMod && event.shiftKey && event.key.toLowerCase() === 't') {
+      if (isMod && event.shiftKey && event.key.toLowerCase() === 'n') {
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
+        return false
+      }
+      if (isMod && event.shiftKey && event.key.toLowerCase() === 't') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-workspace' }))
         return false
       }
       if (event.altKey && !isMod) {

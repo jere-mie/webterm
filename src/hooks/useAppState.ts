@@ -1,33 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
 
-const SCHEMA_VERSION = 2
 const STORAGE_KEY = 'webterm.workspace-layout'
 
 export interface Workspace {
   id: string
   name: string
-  sessionIds: string[]
+  sessionIds: string[]      // all sessions in this workspace (shown in sidebar)
+  openSessionIds: string[]  // currently open as tabs (subset of sessionIds)
 }
-
-export interface SidebarFolder {
-  type: 'folder'
-  id: string
-  name: string
-  collapsed: boolean
-  workspaceIds: string[]
-}
-
-export interface SidebarWorkspaceRef {
-  type: 'workspace'
-  workspaceId: string
-}
-
-export type SidebarItem = SidebarFolder | SidebarWorkspaceRef
 
 interface PersistedLayout {
-  version: 2
-  workspaces: Workspace[]
-  sidebarItems: SidebarItem[]
+  version: 3
+  workspaces: Workspace[]   // ordered by display position
   activeWorkspaceId: string | null
   lastActiveSessionPerWorkspace: Record<string, string>
 }
@@ -37,18 +21,59 @@ function makeId(prefix: string): string {
 }
 
 function makeWorkspace(name: string): Workspace {
-  return { id: makeId('ws'), name, sessionIds: [] }
+  return { id: makeId('ws'), name, sessionIds: [], openSessionIds: [] }
 }
 
 function defaultLayout(): PersistedLayout {
   const ws = makeWorkspace('Default')
   return {
-    version: 2,
+    version: 3,
     workspaces: [ws],
-    sidebarItems: [{ type: 'workspace', workspaceId: ws.id }],
     activeWorkspaceId: ws.id,
     lastActiveSessionPerWorkspace: {},
   }
+}
+
+// Migrate from schema v2 (with folders/sidebarItems) to v3
+function migrateFromV2(raw: Record<string, unknown>): PersistedLayout | null {
+  if (!Array.isArray(raw.workspaces) || !Array.isArray(raw.sidebarItems)) return null
+
+  // Flatten sidebarItems to determine workspace order
+  const workspaceOrder: string[] = []
+  for (const item of raw.sidebarItems as Array<{ type: string; workspaceId?: string; workspaceIds?: string[] }>) {
+    if (item.type === 'workspace' && item.workspaceId) {
+      workspaceOrder.push(item.workspaceId)
+    } else if (item.type === 'folder' && Array.isArray(item.workspaceIds)) {
+      workspaceOrder.push(...item.workspaceIds)
+    }
+  }
+
+  const workspacesById = new Map<string, { id: string; name: string; sessionIds: string[] }>()
+  for (const ws of raw.workspaces as Array<{ id: string; name: string; sessionIds: string[] }>) {
+    workspacesById.set(ws.id, ws)
+  }
+
+  const seen = new Set<string>()
+  const ordered: Workspace[] = []
+  for (const id of [...workspaceOrder, ...workspacesById.keys()]) {
+    if (seen.has(id)) continue
+    seen.add(id)
+    const ws = workspacesById.get(id)
+    if (ws) {
+      ordered.push({ id: ws.id, name: ws.name, sessionIds: ws.sessionIds, openSessionIds: [...ws.sessionIds] })
+    }
+  }
+
+  if (ordered.length === 0) return null
+
+  const activeWorkspaceId =
+    typeof raw.activeWorkspaceId === 'string' ? raw.activeWorkspaceId : ordered[0].id
+  const lastActive =
+    typeof raw.lastActiveSessionPerWorkspace === 'object' && raw.lastActiveSessionPerWorkspace !== null
+      ? (raw.lastActiveSessionPerWorkspace as Record<string, string>)
+      : {}
+
+  return { version: 3, workspaces: ordered, activeWorkspaceId, lastActiveSessionPerWorkspace: lastActive }
 }
 
 function loadLayout(): PersistedLayout {
@@ -56,15 +81,15 @@ function loadLayout(): PersistedLayout {
     if (typeof window === 'undefined') return defaultLayout()
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (!raw) return defaultLayout()
-    const parsed = JSON.parse(raw) as Partial<PersistedLayout>
-    if (
-      parsed.version !== SCHEMA_VERSION ||
-      !Array.isArray(parsed.workspaces) ||
-      !Array.isArray(parsed.sidebarItems)
-    ) {
-      return defaultLayout()
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (parsed.version === 3 && Array.isArray(parsed.workspaces)) {
+      return parsed as unknown as PersistedLayout
     }
-    return parsed as PersistedLayout
+    if (parsed.version === 2) {
+      const migrated = migrateFromV2(parsed)
+      if (migrated) return migrated
+    }
+    return defaultLayout()
   } catch {
     return defaultLayout()
   }
@@ -76,118 +101,66 @@ function saveLayout(layout: PersistedLayout): void {
   }
 }
 
-function repairSidebarItems(items: SidebarItem[], validWorkspaceIds: Set<string>): SidebarItem[] {
-  const seenWorkspaces = new Set<string>()
-  const result: SidebarItem[] = []
-
-  for (const item of items) {
-    if (item.type === 'workspace') {
-      if (validWorkspaceIds.has(item.workspaceId) && !seenWorkspaces.has(item.workspaceId)) {
-        seenWorkspaces.add(item.workspaceId)
-        result.push(item)
-      }
-    } else {
-      const validIds = item.workspaceIds.filter(
-        (id) => validWorkspaceIds.has(id) && !seenWorkspaces.has(id),
-      )
-      for (const id of validIds) seenWorkspaces.add(id)
-      result.push({ ...item, workspaceIds: validIds })
-    }
-  }
-
-  // Append workspaces not referenced in sidebar yet
-  for (const id of validWorkspaceIds) {
-    if (!seenWorkspaces.has(id)) {
-      result.push({ type: 'workspace', workspaceId: id })
-    }
-  }
-
-  return result
-}
-
 function repairLayout(layout: PersistedLayout, serverSessionIds: string[]): PersistedLayout {
   const sessionSet = new Set(serverSessionIds)
   const seenSessions = new Set<string>()
 
-  // Remove stale session IDs from workspaces; deduplicate
-  const workspaces = layout.workspaces.map((ws) => ({
-    ...ws,
-    sessionIds: ws.sessionIds.filter((id) => {
+  const workspaces = layout.workspaces.map((ws) => {
+    const sessionIds = ws.sessionIds.filter((id) => {
       if (!sessionSet.has(id) || seenSessions.has(id)) return false
       seenSessions.add(id)
       return true
-    }),
-  }))
+    })
+    const sessionIdSet = new Set(sessionIds)
+    const openSessionIds = (ws.openSessionIds ?? sessionIds).filter((id) => sessionIdSet.has(id))
+    return { ...ws, sessionIds, openSessionIds }
+  })
 
   const finalWorkspaces = workspaces.length > 0 ? workspaces : [makeWorkspace('Default')]
-  const workspaceIds = new Set(finalWorkspaces.map((w) => w.id))
-  const sidebarItems = repairSidebarItems(layout.sidebarItems, workspaceIds)
+  const workspaceIdSet = new Set(finalWorkspaces.map((w) => w.id))
 
   let activeWorkspaceId = layout.activeWorkspaceId
-  if (!activeWorkspaceId || !workspaceIds.has(activeWorkspaceId)) {
+  if (!activeWorkspaceId || !workspaceIdSet.has(activeWorkspaceId)) {
     activeWorkspaceId = finalWorkspaces[0].id
   }
 
   const lastActiveSessionPerWorkspace: Record<string, string> = {}
   for (const [wsId, sessionId] of Object.entries(layout.lastActiveSessionPerWorkspace ?? {})) {
     const ws = finalWorkspaces.find((w) => w.id === wsId)
-    if (ws && sessionSet.has(sessionId) && ws.sessionIds.includes(sessionId)) {
+    if (ws && ws.openSessionIds.includes(sessionId)) {
       lastActiveSessionPerWorkspace[wsId] = sessionId
     }
   }
 
-  return {
-    version: 2,
-    workspaces: finalWorkspaces,
-    sidebarItems,
-    activeWorkspaceId,
-    lastActiveSessionPerWorkspace,
-  }
+  return { version: 3, workspaces: finalWorkspaces, activeWorkspaceId, lastActiveSessionPerWorkspace }
 }
 
 function resolveActiveSession(
   ws: Workspace | undefined,
   lastActive: Record<string, string>,
 ): string | null {
-  if (!ws || ws.sessionIds.length === 0) return null
+  if (!ws || ws.openSessionIds.length === 0) return null
   const stored = lastActive[ws.id]
-  if (stored && ws.sessionIds.includes(stored)) return stored
-  return ws.sessionIds[0]
-}
-
-function removeSidebarWorkspace(items: SidebarItem[], workspaceId: string): SidebarItem[] {
-  return items
-    .map((item): SidebarItem | null => {
-      if (item.type === 'workspace' && item.workspaceId === workspaceId) return null
-      if (item.type === 'folder') {
-        return { ...item, workspaceIds: item.workspaceIds.filter((id) => id !== workspaceId) }
-      }
-      return item
-    })
-    .filter((item): item is SidebarItem => item !== null)
+  if (stored && ws.openSessionIds.includes(stored)) return stored
+  return ws.openSessionIds[0]
 }
 
 export interface AppStateReturn {
   workspaces: Workspace[]
-  sidebarItems: SidebarItem[]
   activeWorkspaceId: string | null
   activeWorkspace: Workspace | undefined
   activeSessionId: string | null
-  backgroundSessionIds: string[]
   createWorkspace: (name?: string) => string
   deleteWorkspace: (workspaceId: string) => void
   renameWorkspace: (workspaceId: string, name: string) => void
   setActiveWorkspace: (workspaceId: string) => void
   addSessionToWorkspace: (sessionId: string, workspaceId?: string) => void
-  hideSessionFromWorkspace: (sessionId: string) => void
+  closeTab: (sessionId: string) => void
   setActiveSession: (sessionId: string) => void
-  createFolder: (name: string) => string
-  renameFolder: (folderId: string, name: string) => void
-  deleteFolder: (folderId: string) => void
-  toggleFolder: (folderId: string) => void
-  reorderSidebarItems: (newItems: SidebarItem[]) => void
-  reorderWorkspacesInFolder: (folderId: string, newWorkspaceIds: string[]) => void
-  moveWorkspaceToFolder: (workspaceId: string, folderId: string | null) => void
+  moveSessionToWorkspace: (sessionId: string, targetWorkspaceId: string, atIndex?: number) => void
+  reorderSessionsInWorkspace: (workspaceId: string, newSessionIds: string[]) => void
+  reorderOpenTabs: (workspaceId: string, newOpenSessionIds: string[]) => void
+  reorderWorkspaces: (newWorkspaceIds: string[]) => void
 }
 
 export function useAppState(serverSessionIds: string[]): AppStateReturn {
@@ -198,7 +171,6 @@ export function useAppState(serverSessionIds: string[]): AppStateReturn {
 
   const sessionIdsKey = serverSessionIds.join(',')
 
-  // Re-run repair whenever server session list changes (removes stale, does NOT add new sessions)
   useEffect(() => {
     setLayout((current) => repairLayout(current, serverSessionIds))
   }, [sessionIdsKey]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -209,28 +181,44 @@ export function useAppState(serverSessionIds: string[]): AppStateReturn {
 
   const activeWorkspace = layout.workspaces.find((w) => w.id === layout.activeWorkspaceId)
   const activeSessionId = resolveActiveSession(activeWorkspace, layout.lastActiveSessionPerWorkspace)
-  const allWorkspaceSessionIds = new Set(layout.workspaces.flatMap((w) => w.sessionIds))
-  const backgroundSessionIds = serverSessionIds.filter((id) => !allWorkspaceSessionIds.has(id))
 
   const createWorkspace = useCallback((name?: string): string => {
     const ws = makeWorkspace(name ?? 'Workspace')
-    setLayout((l) => ({
-      ...l,
-      workspaces: [...l.workspaces, ws],
-      sidebarItems: [...l.sidebarItems, { type: 'workspace', workspaceId: ws.id }],
-    }))
+    setLayout((l) => ({ ...l, workspaces: [...l.workspaces, ws] }))
     return ws.id
   }, [])
 
   const deleteWorkspace = useCallback((workspaceId: string) => {
     setLayout((l) => {
-      const workspaces = l.workspaces.filter((w) => w.id !== workspaceId)
-      const sidebarItems = removeSidebarWorkspace(l.sidebarItems, workspaceId)
-      const activeWorkspaceId =
-        l.activeWorkspaceId === workspaceId ? (workspaces[0]?.id ?? null) : l.activeWorkspaceId
+      if (l.workspaces.length <= 1) return l
+      const idx = l.workspaces.findIndex((w) => w.id === workspaceId)
+      if (idx === -1) return l
+
+      const ws = l.workspaces[idx]
+      const remaining = l.workspaces.filter((w) => w.id !== workspaceId)
+      const targetIdx = Math.min(idx, remaining.length - 1)
+
+      // Move orphaned sessions to adjacent workspace
+      const orphanedSessionIds = ws.sessionIds
+      const orphanedOpenIds = ws.openSessionIds
+
+      const finalWorkspaces = remaining.map((w, i) => {
+        if (i !== targetIdx) return w
+        return {
+          ...w,
+          sessionIds: [...w.sessionIds, ...orphanedSessionIds],
+          openSessionIds: [...w.openSessionIds, ...orphanedOpenIds],
+        }
+      })
+
+      const newActive =
+        l.activeWorkspaceId === workspaceId
+          ? (finalWorkspaces[targetIdx]?.id ?? null)
+          : l.activeWorkspaceId
       const lastActive = { ...l.lastActiveSessionPerWorkspace }
       delete lastActive[workspaceId]
-      return { ...l, workspaces, sidebarItems, activeWorkspaceId, lastActiveSessionPerWorkspace: lastActive }
+
+      return { ...l, workspaces: finalWorkspaces, activeWorkspaceId: newActive, lastActiveSessionPerWorkspace: lastActive }
     })
   }, [])
 
@@ -250,169 +238,140 @@ export function useAppState(serverSessionIds: string[]): AppStateReturn {
       const targetId = workspaceId ?? l.activeWorkspaceId
       if (!targetId) return l
       // Remove from any current workspace first (session can only be in one workspace)
-      const workspaces = l.workspaces.map((w) => ({
+      const withoutSession = l.workspaces.map((w) => ({
         ...w,
         sessionIds: w.sessionIds.filter((id) => id !== sessionId),
+        openSessionIds: w.openSessionIds.filter((id) => id !== sessionId),
       }))
       return {
         ...l,
-        workspaces: workspaces.map((w) =>
-          w.id === targetId ? { ...w, sessionIds: [...w.sessionIds, sessionId] } : w,
+        workspaces: withoutSession.map((w) =>
+          w.id === targetId
+            ? { ...w, sessionIds: [...w.sessionIds, sessionId], openSessionIds: [...w.openSessionIds, sessionId] }
+            : w,
         ),
       }
     })
   }, [])
 
-  const hideSessionFromWorkspace = useCallback((sessionId: string) => {
+  const closeTab = useCallback((sessionId: string) => {
     setLayout((l) => ({
       ...l,
       workspaces: l.workspaces.map((w) => ({
         ...w,
-        sessionIds: w.sessionIds.filter((id) => id !== sessionId),
+        openSessionIds: w.openSessionIds.filter((id) => id !== sessionId),
       })),
+      lastActiveSessionPerWorkspace: Object.fromEntries(
+        Object.entries(l.lastActiveSessionPerWorkspace).filter(([, sid]) => sid !== sessionId),
+      ),
     }))
   }, [])
 
   const setActiveSession = useCallback((sessionId: string) => {
     setLayout((l) => {
-      if (!l.activeWorkspaceId) return l
-      const ws = l.workspaces.find((w) => w.id === l.activeWorkspaceId)
-      if (!ws) return l
-      // If session is not in the workspace yet (clicked from background), add it first
-      let workspaces = l.workspaces
-      if (!ws.sessionIds.includes(sessionId)) {
-        workspaces = l.workspaces.map((w) =>
-          w.id === l.activeWorkspaceId ? { ...w, sessionIds: [...w.sessionIds, sessionId] } : w,
-        )
-      }
+      // Find which workspace contains this session
+      const ownerWs = l.workspaces.find((w) => w.sessionIds.includes(sessionId))
+      if (!ownerWs) return l
+
+      const workspaceId = ownerWs.id
+      const workspaces = l.workspaces.map((w) => {
+        if (w.id !== workspaceId) return w
+        const openSessionIds = w.openSessionIds.includes(sessionId)
+          ? w.openSessionIds
+          : [...w.openSessionIds, sessionId]
+        return { ...w, openSessionIds }
+      })
+
       return {
         ...l,
         workspaces,
-        lastActiveSessionPerWorkspace: {
-          ...l.lastActiveSessionPerWorkspace,
-          [l.activeWorkspaceId]: sessionId,
-        },
+        activeWorkspaceId: workspaceId,
+        lastActiveSessionPerWorkspace: { ...l.lastActiveSessionPerWorkspace, [workspaceId]: sessionId },
       }
     })
   }, [])
 
-  const createFolder = useCallback((name: string): string => {
-    const id = makeId('folder')
-    setLayout((l) => ({
-      ...l,
-      sidebarItems: [
-        ...l.sidebarItems,
-        { type: 'folder', id, name, collapsed: false, workspaceIds: [] },
-      ],
-    }))
-    return id
-  }, [])
+  const moveSessionToWorkspace = useCallback(
+    (sessionId: string, targetWorkspaceId: string, atIndex?: number) => {
+      setLayout((l) => {
+        const sourceWs = l.workspaces.find((w) => w.sessionIds.includes(sessionId))
+        if (!sourceWs || sourceWs.id === targetWorkspaceId) return l
 
-  const renameFolder = useCallback((folderId: string, name: string) => {
-    setLayout((l) => ({
-      ...l,
-      sidebarItems: l.sidebarItems.map((item) =>
-        item.type === 'folder' && item.id === folderId ? { ...item, name } : item,
-      ),
-    }))
-  }, [])
+        const wasOpen = sourceWs.openSessionIds.includes(sessionId)
 
-  const deleteFolder = useCallback((folderId: string) => {
-    setLayout((l) => {
-      const folder = l.sidebarItems.find(
-        (item): item is SidebarFolder => item.type === 'folder' && item.id === folderId,
-      )
-      if (!folder) return l
-      // Move workspaces out of folder to top level
-      const newItems: SidebarItem[] = []
-      for (const item of l.sidebarItems) {
-        if (item.type === 'folder' && item.id === folderId) {
-          for (const wsId of folder.workspaceIds) {
-            newItems.push({ type: 'workspace', workspaceId: wsId })
+        const workspaces = l.workspaces.map((w) => {
+          if (w.id === sourceWs.id) {
+            return {
+              ...w,
+              sessionIds: w.sessionIds.filter((id) => id !== sessionId),
+              openSessionIds: w.openSessionIds.filter((id) => id !== sessionId),
+            }
           }
-        } else {
-          newItems.push(item)
-        }
-      }
-      return { ...l, sidebarItems: newItems }
-    })
-  }, [])
+          if (w.id === targetWorkspaceId) {
+            const insertAt =
+              atIndex !== undefined ? Math.min(atIndex, w.sessionIds.length) : w.sessionIds.length
+            const newSessionIds = [...w.sessionIds]
+            newSessionIds.splice(insertAt, 0, sessionId)
+            const newOpenIds = wasOpen
+              ? (() => {
+                  const arr = [...w.openSessionIds]
+                  arr.splice(Math.min(insertAt, arr.length), 0, sessionId)
+                  return arr
+                })()
+              : w.openSessionIds
+            return { ...w, sessionIds: newSessionIds, openSessionIds: newOpenIds }
+          }
+          return w
+        })
 
-  const toggleFolder = useCallback((folderId: string) => {
+        return { ...l, workspaces }
+      })
+    },
+    [],
+  )
+
+  const reorderSessionsInWorkspace = useCallback((workspaceId: string, newSessionIds: string[]) => {
     setLayout((l) => ({
       ...l,
-      sidebarItems: l.sidebarItems.map((item) =>
-        item.type === 'folder' && item.id === folderId
-          ? { ...item, collapsed: !item.collapsed }
-          : item,
+      workspaces: l.workspaces.map((w) => (w.id === workspaceId ? { ...w, sessionIds: newSessionIds } : w)),
+    }))
+  }, [])
+
+  const reorderOpenTabs = useCallback((workspaceId: string, newOpenSessionIds: string[]) => {
+    setLayout((l) => ({
+      ...l,
+      workspaces: l.workspaces.map((w) =>
+        w.id === workspaceId ? { ...w, openSessionIds: newOpenSessionIds } : w,
       ),
     }))
   }, [])
 
-  const reorderSidebarItems = useCallback((newItems: SidebarItem[]) => {
-    setLayout((l) => ({ ...l, sidebarItems: newItems }))
-  }, [])
-
-  const reorderWorkspacesInFolder = useCallback((folderId: string, newWorkspaceIds: string[]) => {
-    setLayout((l) => ({
-      ...l,
-      sidebarItems: l.sidebarItems.map((item) =>
-        item.type === 'folder' && item.id === folderId
-          ? { ...item, workspaceIds: newWorkspaceIds }
-          : item,
-      ),
-    }))
-  }, [])
-
-  const moveWorkspaceToFolder = useCallback((workspaceId: string, folderId: string | null) => {
+  const reorderWorkspaces = useCallback((newWorkspaceIds: string[]) => {
     setLayout((l) => {
-      const itemsWithoutWs: SidebarItem[] = []
-      for (const item of l.sidebarItems) {
-        if (item.type === 'workspace' && item.workspaceId === workspaceId) {
-          // Remove from top level
-        } else if (item.type === 'folder') {
-          itemsWithoutWs.push({
-            ...item,
-            workspaceIds: item.workspaceIds.filter((id) => id !== workspaceId),
-          })
-        } else {
-          itemsWithoutWs.push(item)
-        }
+      const wsMap = new Map(l.workspaces.map((w) => [w.id, w]))
+      const reordered = newWorkspaceIds.map((id) => wsMap.get(id)).filter(Boolean) as Workspace[]
+      for (const ws of l.workspaces) {
+        if (!newWorkspaceIds.includes(ws.id)) reordered.push(ws)
       }
-      if (folderId === null) {
-        return { ...l, sidebarItems: [...itemsWithoutWs, { type: 'workspace', workspaceId }] }
-      }
-      return {
-        ...l,
-        sidebarItems: itemsWithoutWs.map((item) =>
-          item.type === 'folder' && item.id === folderId
-            ? { ...item, workspaceIds: [...item.workspaceIds, workspaceId] }
-            : item,
-        ),
-      }
+      return { ...l, workspaces: reordered }
     })
   }, [])
 
   return {
     workspaces: layout.workspaces,
-    sidebarItems: layout.sidebarItems,
     activeWorkspaceId: layout.activeWorkspaceId,
     activeWorkspace,
     activeSessionId,
-    backgroundSessionIds,
     createWorkspace,
     deleteWorkspace,
     renameWorkspace,
     setActiveWorkspace,
     addSessionToWorkspace,
-    hideSessionFromWorkspace,
+    closeTab,
     setActiveSession,
-    createFolder,
-    renameFolder,
-    deleteFolder,
-    toggleFolder,
-    reorderSidebarItems,
-    reorderWorkspacesInFolder,
-    moveWorkspaceToFolder,
+    moveSessionToWorkspace,
+    reorderSessionsInWorkspace,
+    reorderOpenTabs,
+    reorderWorkspaces,
   }
 }

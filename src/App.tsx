@@ -1,7 +1,21 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-
-const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 import { PanelLeft, Plus, Search, X } from 'lucide-react'
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  horizontalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { io, type Socket } from 'socket.io-client'
 
 import type { SessionMetaPayload, SessionRemovedPayload, SessionSnapshot, SocketAck, SpawnSessionPayload } from '../shared/protocol'
@@ -14,6 +28,8 @@ import { WorkspaceSidebar } from './components/workspace-sidebar'
 import { useAppState } from './hooks/useAppState'
 import { cn } from './lib/utils'
 import './App.css'
+
+const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
 const SIDEBAR_WIDTH_KEY = 'webterm.sidebar-width'
 const SIDEBAR_MIN_WIDTH = 160
@@ -29,6 +45,57 @@ function getInitialSidebarWidth(): number {
   } catch { /* ok */ }
   return SIDEBAR_DEFAULT_WIDTH
 }
+
+// ─── Sortable tab (for tab strip DnD) ────────────────────────────────────────
+
+interface SortableTabProps {
+  session: SessionSnapshot
+  isActive: boolean
+  onSelect: () => void
+  onClose: () => void
+}
+
+function SortableTab({ session, isActive, onSelect, onClose }: SortableTabProps) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: session.id,
+  })
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+  }
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      aria-selected={isActive}
+      className={cn('workspace-tab', isActive && 'is-active', isDragging && 'is-dragging')}
+      role="tab"
+      {...attributes}
+      {...listeners}
+    >
+      <button
+        className="workspace-tab-btn"
+        onClick={onSelect}
+        type="button"
+      >
+        <span className={cn('tab-state-dot', session.state === 'live' && 'is-live')} />
+        <span className="workspace-tab-title">{session.title}</span>
+      </button>
+      <button
+        aria-label={`Close ${session.title} tab`}
+        className="workspace-tab-close"
+        onClick={(e) => { e.stopPropagation(); onClose() }}
+        onPointerDown={(e) => e.stopPropagation()}
+        type="button"
+        title="Close tab (session stays in sidebar)"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  )
+}
+
 
 function App() {
   const socketRef = useRef<Socket | null>(null)
@@ -47,25 +114,20 @@ function App() {
 
   const {
     workspaces,
-    sidebarItems,
     activeWorkspaceId,
     activeWorkspace,
     activeSessionId,
-    backgroundSessionIds,
     createWorkspace,
     deleteWorkspace,
     renameWorkspace,
     setActiveWorkspace,
     addSessionToWorkspace,
-    hideSessionFromWorkspace,
+    closeTab,
     setActiveSession,
-    createFolder,
-    renameFolder,
-    deleteFolder,
-    toggleFolder,
-    reorderSidebarItems,
-    reorderWorkspacesInFolder,
-    moveWorkspaceToFolder,
+    moveSessionToWorkspace,
+    reorderSessionsInWorkspace,
+    reorderOpenTabs,
+    reorderWorkspaces,
   } = useAppState(sessionIds)
 
   const emitWithAck = useCallback(
@@ -150,7 +212,7 @@ function App() {
           if (activeSessionId) issueTerminalCommand(activeSessionId, 'clear')
           return
         case 'hide-from-workspace':
-          if (activeSessionId) hideSessionFromWorkspace(activeSessionId)
+          if (activeSessionId) closeTab(activeSessionId)
           return
         case 'kill-session':
           if (activeSessionId) await closeSession(activeSessionId)
@@ -163,7 +225,7 @@ function App() {
           return
       }
     },
-    [activeSessionId, sessions, closeSession, hideSessionFromWorkspace, restartSession, spawnSession],
+    [activeSessionId, sessions, closeSession, closeTab, restartSession, spawnSession],
   )
 
   useEffect(() => {
@@ -240,30 +302,35 @@ function App() {
   // Keyboard shortcuts including Alt+Up/Down (workspaces) and Alt+Left/Right (tabs)
   useEffect(() => {
     function getAllWorkspaceIds(): string[] {
-      const ids: string[] = []
-      for (const item of sidebarItems) {
-        if (item.type === 'workspace') ids.push(item.workspaceId)
-        else ids.push(...item.workspaceIds)
-      }
-      return ids
+      return workspaces.map((w) => w.id)
     }
 
     function handleKeyboardShortcuts(event: KeyboardEvent) {
       const commandKey = event.ctrlKey || event.metaKey
 
-      if (commandKey && event.key.toLowerCase() === 'k') {
+      // Ctrl/Cmd+K → command palette
+      if (commandKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
         event.preventDefault()
         setPaletteOpen(true)
       }
 
-      if (event.shiftKey && !commandKey && event.key.toLowerCase() === 't') {
+      // Ctrl/Cmd+Shift+N → new session
+      if (commandKey && event.shiftKey && event.key.toLowerCase() === 'n') {
         event.preventDefault()
         void spawnSession()
       }
 
-      if (commandKey && event.key.toLowerCase() === 'w' && activeSessionId) {
+      // Ctrl/Cmd+Shift+T → new workspace
+      if (commandKey && event.shiftKey && event.key.toLowerCase() === 't') {
         event.preventDefault()
-        hideSessionFromWorkspace(activeSessionId)
+        const id = createWorkspace()
+        setActiveWorkspace(id)
+      }
+
+      // Ctrl/Cmd+W → close active tab
+      if (commandKey && !event.shiftKey && event.key.toLowerCase() === 'w' && activeSessionId) {
+        event.preventDefault()
+        closeTab(activeSessionId)
       }
 
       if (event.altKey && !commandKey) {
@@ -279,7 +346,7 @@ function App() {
 
         if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
           event.preventDefault()
-          const tabIds = activeWorkspace?.sessionIds ?? []
+          const tabIds = activeWorkspace?.openSessionIds ?? []
           if (tabIds.length === 0) return
           const currentIdx = tabIds.indexOf(activeSessionId ?? '')
           const delta = event.key === 'ArrowRight' ? 1 : -1
@@ -291,14 +358,7 @@ function App() {
 
     function handleXtermShortcut(event: Event) {
       const detail = (event as CustomEvent<string>).detail
-      const allWsIds = (() => {
-        const ids: string[] = []
-        for (const item of sidebarItems) {
-          if (item.type === 'workspace') ids.push(item.workspaceId)
-          else ids.push(...item.workspaceIds)
-        }
-        return ids
-      })()
+      const allWsIds = workspaces.map((w) => w.id)
 
       switch (detail) {
         case 'open-palette':
@@ -307,8 +367,13 @@ function App() {
         case 'new-session':
           void spawnSession()
           break
+        case 'new-workspace': {
+          const id = createWorkspace()
+          setActiveWorkspace(id)
+          break
+        }
         case 'hide-from-workspace':
-          if (activeSessionId) hideSessionFromWorkspace(activeSessionId)
+          if (activeSessionId) closeTab(activeSessionId)
           break
         case 'alt-prev-workspace': {
           if (allWsIds.length === 0) break
@@ -323,14 +388,14 @@ function App() {
           break
         }
         case 'alt-prev-tab': {
-          const tabIds = activeWorkspace?.sessionIds ?? []
+          const tabIds = activeWorkspace?.openSessionIds ?? []
           if (tabIds.length === 0) break
           const idx = tabIds.indexOf(activeSessionId ?? '')
           setActiveSession(tabIds[(idx - 1 + tabIds.length) % tabIds.length])
           break
         }
         case 'alt-next-tab': {
-          const tabIds = activeWorkspace?.sessionIds ?? []
+          const tabIds = activeWorkspace?.openSessionIds ?? []
           if (tabIds.length === 0) break
           const idx = tabIds.indexOf(activeSessionId ?? '')
           setActiveSession(tabIds[(idx + 1) % tabIds.length])
@@ -350,8 +415,9 @@ function App() {
     activeSessionId,
     activeWorkspaceId,
     activeWorkspace,
-    sidebarItems,
-    hideSessionFromWorkspace,
+    workspaces,
+    closeTab,
+    createWorkspace,
     setActiveSession,
     setActiveWorkspace,
     spawnSession,
@@ -395,10 +461,24 @@ function App() {
     window.addEventListener('pointerup', onUp)
   }
 
-  // Tab strip: only sessions belonging to the active workspace
-  const workspaceTabs = (activeWorkspace?.sessionIds ?? [])
+  // Tab strip: only open sessions in the active workspace, with DnD
+  const openTabIds = activeWorkspace?.openSessionIds ?? []
+  const workspaceTabs = openTabIds
     .map((id) => sessions.find((s) => s.id === id))
     .filter(Boolean) as SessionSnapshot[]
+
+  const tabSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  )
+
+  function handleTabDragEnd({ active, over }: DragEndEvent) {
+    if (!over || active.id === over.id || !activeWorkspaceId) return
+    const oldIdx = openTabIds.indexOf(active.id as string)
+    const newIdx = openTabIds.indexOf(over.id as string)
+    if (oldIdx !== -1 && newIdx !== -1) {
+      reorderOpenTabs(activeWorkspaceId, arrayMove(openTabIds, oldIdx, newIdx))
+    }
+  }
 
   return (
     <div
@@ -431,12 +511,9 @@ function App() {
 
         <WorkspaceSidebar
           workspaces={workspaces}
-          sidebarItems={sidebarItems}
           sessions={sessions}
           activeWorkspaceId={activeWorkspaceId}
           activeSessionId={activeSessionId}
-          backgroundSessionIds={backgroundSessionIds}
-          socketConnected={socketState === 'connected'}
           onSelectWorkspace={setActiveWorkspace}
           onDeleteWorkspace={deleteWorkspace}
           onRenameWorkspace={renameWorkspace}
@@ -444,20 +521,15 @@ function App() {
             const id = createWorkspace()
             setActiveWorkspace(id)
           }}
-          onCreateFolder={createFolder}
-          onRenameFolder={renameFolder}
-          onDeleteFolder={deleteFolder}
-          onToggleFolder={toggleFolder}
-          onReorderSidebarItems={reorderSidebarItems}
-          onReorderWorkspacesInFolder={reorderWorkspacesInFolder}
-          onMoveWorkspaceToFolder={moveWorkspaceToFolder}
           onSelectSession={(id) => {
             setActiveSession(id)
             setSidebarOpen(false)
           }}
           onKillSession={(id) => void closeSession(id)}
-          onAddBackgroundSession={(id) => addSessionToWorkspace(id)}
           onNewSession={() => void spawnSession()}
+          onReorderWorkspaces={reorderWorkspaces}
+          onReorderSessionsInWorkspace={reorderSessionsInWorkspace}
+          onMoveSessionToWorkspace={moveSessionToWorkspace}
         />
       </aside>
 
@@ -481,38 +553,29 @@ function App() {
             <div className="workspace-name-label">{activeWorkspace.name}</div>
           )}
 
-          {/* Tab strip — only shows sessions in the active workspace */}
-          <div className="workspace-tabs" role="tablist">
-            {workspaceTabs.map((session) => {
-              const isActive = session.id === activeSessionId
-              return (
-                <div
-                  aria-selected={isActive}
-                  className={cn('workspace-tab', isActive && 'is-active')}
-                  key={session.id}
-                  role="tab"
-                >
-                  <button
-                    className="workspace-tab-btn"
-                    onClick={() => setActiveSession(session.id)}
-                    type="button"
-                  >
-                    <span className={cn('tab-state-dot', session.state === 'live' && 'is-live')} />
-                    <span className="workspace-tab-title">{session.title}</span>
-                  </button>
-                  <button
-                    aria-label={`Hide ${session.title} from workspace`}
-                    className="workspace-tab-close"
-                    onClick={() => hideSessionFromWorkspace(session.id)}
-                    type="button"
-                    title="Hide from workspace (PTY keeps running)"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              )
-            })}
-          </div>
+          {/* Tab strip — only shows open sessions in the active workspace */}
+          <DndContext
+            sensors={tabSensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleTabDragEnd}
+          >
+            <SortableContext items={openTabIds} strategy={horizontalListSortingStrategy}>
+              <div className="workspace-tabs" role="tablist">
+                {workspaceTabs.map((session) => (
+                  <SortableTab
+                    key={session.id}
+                    session={session}
+                    isActive={session.id === activeSessionId}
+                    onSelect={() => setActiveSession(session.id)}
+                    onClose={() => closeTab(session.id)}
+                  />
+                ))}
+              </div>
+            </SortableContext>
+            <DragOverlay dropAnimation={null}>
+              {null}
+            </DragOverlay>
+          </DndContext>
 
           <div className="workspace-actions">
             <button

@@ -7,7 +7,6 @@ import {
   useSensor,
   useSensors,
   type DragEndEvent,
-  type DragOverEvent,
   type DragStartEvent,
 } from '@dnd-kit/core'
 import {
@@ -17,35 +16,35 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { ChevronDown, ChevronRight, Folder, FolderPlus, GripVertical, Layers, Plus, Terminal, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, GripVertical, Layers, Plus, X } from 'lucide-react'
 
 import type { SessionSnapshot } from '../../shared/protocol'
-import type { SidebarFolder, SidebarItem, Workspace } from '../hooks/useAppState'
+import type { Workspace } from '../hooks/useAppState'
 import { cn } from '../lib/utils'
+
+const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
+
+interface DragData {
+  type: 'workspace' | 'session'
+  workspaceId: string
+  sessionId?: string
+}
 
 interface WorkspaceSidebarProps {
   workspaces: Workspace[]
-  sidebarItems: SidebarItem[]
   sessions: SessionSnapshot[]
   activeWorkspaceId: string | null
   activeSessionId: string | null
-  backgroundSessionIds: string[]
-  socketConnected: boolean
   onSelectWorkspace: (workspaceId: string) => void
   onDeleteWorkspace: (workspaceId: string) => void
   onRenameWorkspace: (workspaceId: string, name: string) => void
   onCreateWorkspace: () => void
-  onCreateFolder: (name: string) => void
-  onRenameFolder: (folderId: string, name: string) => void
-  onDeleteFolder: (folderId: string) => void
-  onToggleFolder: (folderId: string) => void
-  onReorderSidebarItems: (items: SidebarItem[]) => void
-  onReorderWorkspacesInFolder: (folderId: string, wsIds: string[]) => void
-  onMoveWorkspaceToFolder: (workspaceId: string, folderId: string | null) => void
   onSelectSession: (sessionId: string) => void
   onKillSession: (sessionId: string) => void
-  onAddBackgroundSession: (sessionId: string) => void
   onNewSession: () => void
+  onReorderWorkspaces: (newWorkspaceIds: string[]) => void
+  onReorderSessionsInWorkspace: (workspaceId: string, newSessionIds: string[]) => void
+  onMoveSessionToWorkspace: (sessionId: string, targetWorkspaceId: string, atIndex?: number) => void
 }
 
 function sessionMap(sessions: SessionSnapshot[]): Map<string, SessionSnapshot> {
@@ -75,20 +74,63 @@ function worstState(
 }
 
 // ─────────────────────────────────────────────────────
-// Session row inside a workspace
+// Session row (sortable, supports open/closed state)
 // ─────────────────────────────────────────────────────
 
 interface SessionRowProps {
   session: SessionSnapshot | undefined
   sessionId: string
+  workspaceId: string
   isActiveSession: boolean
+  isOpen: boolean
+  isDragOverlay?: boolean
   onSelect: () => void
   onKill: () => void
 }
 
-function SessionRow({ session, sessionId, isActiveSession, onSelect, onKill }: SessionRowProps) {
+function SessionRow({
+  session,
+  sessionId,
+  workspaceId,
+  isActiveSession,
+  isOpen,
+  isDragOverlay = false,
+  onSelect,
+  onKill,
+}: SessionRowProps) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
+    useSortable({
+      id: sessionId,
+      data: { type: 'session', sessionId, workspaceId } satisfies DragData,
+    })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.3 : 1,
+  }
+
   return (
-    <div className={cn('ws-session-item', isActiveSession && 'is-active')}>
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        'ws-session-item',
+        isActiveSession && 'is-active',
+        !isOpen && 'is-closed',
+        isDragOverlay && 'is-drag-overlay',
+      )}
+    >
+      <button
+        ref={setActivatorNodeRef}
+        className="drag-handle"
+        aria-label="Drag session"
+        tabIndex={-1}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-3 w-3" />
+      </button>
       <button className="ws-session-main" onClick={onSelect} type="button">
         <span
           className={cn(
@@ -106,6 +148,7 @@ function SessionRow({ session, sessionId, isActiveSession, onSelect, onKill }: S
         className="ws-session-kill"
         onClick={onKill}
         type="button"
+        title="Kill process"
       >
         <X className="h-3 w-3" />
       </button>
@@ -147,7 +190,10 @@ function WorkspaceRow({
   const [renameValue, setRenameValue] = useState(workspace.name)
 
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
-    useSortable({ id: workspace.id })
+    useSortable({
+      id: `ws:${workspace.id}`,
+      data: { type: 'workspace', workspaceId: workspace.id } satisfies DragData,
+    })
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -233,153 +279,142 @@ function WorkspaceRow({
       </div>
 
       {expanded && !isDragOverlay && (
-        <div className="ws-sessions">
-          {workspace.sessionIds.map((sessionId) => (
-            <SessionRow
-              key={sessionId}
-              session={sMap.get(sessionId)}
-              sessionId={sessionId}
-              isActiveSession={sessionId === activeSessionId}
-              onSelect={() => onSelectSession(sessionId)}
-              onKill={() => onKillSession(sessionId)}
-            />
-          ))}
-          {workspace.sessionIds.length === 0 && (
-            <div className="ws-empty-hint">No sessions — press + to spawn one</div>
-          )}
-        </div>
+        <SortableContext items={workspace.sessionIds} strategy={verticalListSortingStrategy}>
+          <div className="ws-sessions">
+            {workspace.sessionIds.map((sessionId) => (
+              <SessionRow
+                key={sessionId}
+                session={sMap.get(sessionId)}
+                sessionId={sessionId}
+                workspaceId={workspace.id}
+                isActiveSession={sessionId === activeSessionId}
+                isOpen={workspace.openSessionIds.includes(sessionId)}
+                onSelect={() => onSelectSession(sessionId)}
+                onKill={() => onKillSession(sessionId)}
+              />
+            ))}
+            {workspace.sessionIds.length === 0 && (
+              <div className="ws-empty-hint">No sessions — press + to spawn one</div>
+            )}
+          </div>
+        </SortableContext>
       )}
     </div>
   )
 }
 
 // ─────────────────────────────────────────────────────
-// Folder row (sortable)
+// Main WorkspaceSidebar
 // ─────────────────────────────────────────────────────
 
-interface FolderRowProps {
-  folder: SidebarFolder
-  workspaces: Workspace[]
-  sMap: Map<string, SessionSnapshot>
-  activeWorkspaceId: string | null
-  activeSessionId: string | null
-  isDropTarget: boolean
-  isDragOverlay?: boolean
-  onSelectWorkspace: (id: string) => void
-  onDeleteWorkspace: (id: string) => void
-  onRenameWorkspace: (id: string, name: string) => void
-  onSelectSession: (id: string) => void
-  onKillSession: (id: string) => void
-  onToggle: () => void
-  onRename: (name: string) => void
-  onDelete: () => void
-}
-
-function FolderRow({
-  folder,
+export function WorkspaceSidebar({
   workspaces,
-  sMap,
+  sessions,
   activeWorkspaceId,
   activeSessionId,
-  isDropTarget,
-  isDragOverlay = false,
   onSelectWorkspace,
   onDeleteWorkspace,
   onRenameWorkspace,
+  onCreateWorkspace,
   onSelectSession,
   onKillSession,
-  onToggle,
-  onRename,
-  onDelete,
-}: FolderRowProps) {
-  const [renaming, setRenaming] = useState(false)
-  const [renameValue, setRenameValue] = useState(folder.name)
+  onNewSession,
+  onReorderWorkspaces,
+  onReorderSessionsInWorkspace,
+  onMoveSessionToWorkspace,
+}: WorkspaceSidebarProps) {
+  const sMap = sessionMap(sessions)
+  const [activeDragData, setActiveDragData] = useState<DragData | null>(null)
 
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
-    useSortable({ id: folder.id })
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  )
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.3 : 1,
+  function handleDragStart({ active }: DragStartEvent) {
+    setActiveDragData((active.data.current as DragData) ?? null)
   }
 
-  const allSessionIds = workspaces.flatMap((w) => w.sessionIds)
-  const folderState = worstState(allSessionIds, sMap)
-  const hasActiveWorkspace = folder.workspaceIds.includes(activeWorkspaceId ?? '')
+  function handleDragEnd({ active, over }: DragEndEvent) {
+    setActiveDragData(null)
+    if (!over || active.id === over.id) return
 
-  function commitRename() {
-    const trimmed = renameValue.trim()
-    if (trimmed) onRename(trimmed)
-    setRenaming(false)
+    const activeData = active.data.current as DragData | undefined
+    const overData = over.data.current as DragData | undefined
+
+    if (!activeData) return
+
+    if (activeData.type === 'workspace') {
+      // Reorder workspaces
+      const overWsId = overData?.workspaceId ?? (
+        typeof over.id === 'string' && over.id.startsWith('ws:') ? over.id.slice(3) : null
+      )
+      if (!overWsId) return
+      const currentOrder = workspaces.map((w) => w.id)
+      const oldIdx = currentOrder.indexOf(activeData.workspaceId)
+      const newIdx = currentOrder.indexOf(overWsId)
+      if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
+        onReorderWorkspaces(arrayMove(currentOrder, oldIdx, newIdx))
+      }
+    } else if (activeData.type === 'session') {
+      const sessionId = activeData.sessionId!
+      const sourceWsId = activeData.workspaceId
+
+      if (overData?.type === 'session') {
+        const targetWsId = overData.workspaceId
+        if (sourceWsId === targetWsId) {
+          // Reorder within same workspace
+          const ws = workspaces.find((w) => w.id === sourceWsId)
+          if (!ws) return
+          const oldIdx = ws.sessionIds.indexOf(sessionId)
+          const newIdx = ws.sessionIds.indexOf(over.id as string)
+          if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
+            onReorderSessionsInWorkspace(sourceWsId, arrayMove(ws.sessionIds, oldIdx, newIdx))
+          }
+        } else {
+          // Cross-workspace move, insert at target session's index
+          const targetWs = workspaces.find((w) => w.id === targetWsId)
+          if (!targetWs) return
+          const atIndex = targetWs.sessionIds.indexOf(over.id as string)
+          onMoveSessionToWorkspace(sessionId, targetWsId, atIndex === -1 ? undefined : atIndex)
+        }
+      } else if (overData?.type === 'workspace') {
+        // Dropped onto a workspace header — move to end
+        const targetWsId = overData.workspaceId
+        if (sourceWsId !== targetWsId) {
+          onMoveSessionToWorkspace(sessionId, targetWsId)
+        }
+      } else if (typeof over.id === 'string' && over.id.startsWith('ws:')) {
+        // Dropped onto workspace sortable when no over.data (e.g. empty workspace)
+        const targetWsId = over.id.slice(3)
+        if (sourceWsId !== targetWsId) {
+          onMoveSessionToWorkspace(sessionId, targetWsId)
+        }
+      }
+    }
   }
+
+  const workspaceIds = workspaces.map((w) => `ws:${w.id}`)
+
+  // Find the active drag item for the overlay
+  const overlayWorkspace = activeDragData?.type === 'workspace'
+    ? workspaces.find((w) => w.id === activeDragData.workspaceId)
+    : null
+  const overlaySession = activeDragData?.type === 'session'
+    ? { session: sMap.get(activeDragData.sessionId!), ...activeDragData }
+    : null
+
+  const mod = isMac ? '⌘' : 'Ctrl'
 
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className={cn('folder-item', isDropTarget && 'is-drop-target', isDragOverlay && 'is-drag-overlay')}
-    >
-      <div className="folder-header">
-        <button
-          ref={setActivatorNodeRef}
-          className="drag-handle"
-          aria-label="Drag folder"
-          tabIndex={-1}
-          {...attributes}
-          {...listeners}
+    <div className="sidebar-body">
+      <div className="sidebar-tree">
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
         >
-          <GripVertical className="h-3 w-3" />
-        </button>
-
-        <button className="folder-toggle" onClick={onToggle} type="button">
-          {folder.collapsed
-            ? <ChevronRight className="h-3.5 w-3.5" />
-            : <ChevronDown className="h-3.5 w-3.5" />}
-        </button>
-
-        {renaming ? (
-          <input
-            autoFocus
-            className="folder-rename-input"
-            value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onBlur={commitRename}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitRename()
-              if (e.key === 'Escape') setRenaming(false)
-            }}
-          />
-        ) : (
-          <button
-            className={cn('folder-name', hasActiveWorkspace && !folder.collapsed && 'has-active-child')}
-            onDoubleClick={() => { setRenameValue(folder.name); setRenaming(true) }}
-            onClick={folder.collapsed ? onToggle : undefined}
-            type="button"
-          >
-            <Folder className="h-3.5 w-3.5 folder-icon" />
-            <span className="folder-name-text">{folder.name}</span>
-            {folder.collapsed && folder.workspaceIds.length > 0 && (
-              <span className="folder-count">{folder.workspaceIds.length}</span>
-            )}
-          </button>
-        )}
-
-        {folderState && <span className={cn('folder-state-dot', `state-${folderState}`)} />}
-
-        <button
-          aria-label={`Delete ${folder.name}`}
-          className="folder-delete-btn"
-          onClick={onDelete}
-          type="button"
-        >
-          <X className="h-3 w-3" />
-        </button>
-      </div>
-
-      {!folder.collapsed && !isDragOverlay && (
-        <div className={cn('folder-children', isDropTarget && 'is-drop-target')}>
-          <SortableContext items={folder.workspaceIds} strategy={verticalListSortingStrategy}>
+          <SortableContext items={workspaceIds} strategy={verticalListSortingStrategy}>
             {workspaces.map((ws) => (
               <WorkspaceRow
                 key={ws.id}
@@ -395,282 +430,13 @@ function FolderRow({
               />
             ))}
           </SortableContext>
-          {folder.workspaceIds.length === 0 && (
-            <div className="folder-empty-hint">Drop workspaces here</div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
 
-// ─────────────────────────────────────────────────────
-// Background session row
-// ─────────────────────────────────────────────────────
-
-interface BackgroundSessionRowProps {
-  session: SessionSnapshot
-  onSelect: () => void
-  onKill: () => void
-}
-
-function BackgroundSessionRow({ session, onSelect, onKill }: BackgroundSessionRowProps) {
-  return (
-    <div className="bg-session-item">
-      <button className="bg-session-main" onClick={onSelect} type="button">
-        <span className={cn('session-state-dot', `state-${session.state}`)} />
-        <span className="ws-session-info">
-          <span className="ws-session-title">{session.title}</span>
-          <span className="ws-session-path">{session.cwd}</span>
-        </span>
-      </button>
-      <button
-        aria-label={`Kill ${session.title}`}
-        className="ws-session-kill"
-        onClick={onKill}
-        type="button"
-      >
-        <X className="h-3 w-3" />
-      </button>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────
-// Main WorkspaceSidebar
-// ─────────────────────────────────────────────────────
-
-export function WorkspaceSidebar({
-  workspaces,
-  sidebarItems,
-  sessions,
-  activeWorkspaceId,
-  activeSessionId,
-  backgroundSessionIds,
-  onSelectWorkspace,
-  onDeleteWorkspace,
-  onRenameWorkspace,
-  onCreateWorkspace,
-  onCreateFolder,
-  onRenameFolder,
-  onDeleteFolder,
-  onToggleFolder,
-  onReorderSidebarItems,
-  onReorderWorkspacesInFolder,
-  onMoveWorkspaceToFolder,
-  onSelectSession,
-  onKillSession,
-  onNewSession,
-}: WorkspaceSidebarProps) {
-  const sMap = sessionMap(sessions)
-  const wsMap = new Map(workspaces.map((w) => [w.id, w]))
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const [overId, setOverId] = useState<string | null>(null)
-
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-  )
-
-  const activeDragItem = activeId
-    ? sidebarItems.find((item) => {
-        if (item.type === 'workspace') return item.workspaceId === activeId
-        if (item.type === 'folder') return item.id === activeId
-        return false
-      }) ??
-      sidebarItems
-        .flatMap((item) =>
-          item.type === 'folder'
-            ? item.workspaceIds.map((wsId) => ({
-                type: 'workspace' as const,
-                workspaceId: wsId,
-                parentFolderId: item.id,
-              }))
-            : [],
-        )
-        .find((item) => item.workspaceId === activeId)
-    : null
-
-  function handleDragStart({ active }: DragStartEvent) {
-    setActiveId(active.id as string)
-  }
-
-  function handleDragOver({ over }: DragOverEvent) {
-    setOverId((over?.id as string) ?? null)
-  }
-
-  function handleDragEnd({ active, over }: DragEndEvent) {
-    setActiveId(null)
-    setOverId(null)
-    if (!over || active.id === over.id) return
-
-    const activeIdStr = active.id as string
-    const overIdStr = over.id as string
-
-    const activeTopIdx = sidebarItems.findIndex(
-      (item) =>
-        (item.type === 'workspace' && item.workspaceId === activeIdStr) ||
-        (item.type === 'folder' && item.id === activeIdStr),
-    )
-
-    const activeParentFolder = sidebarItems.find(
-      (item): item is SidebarFolder =>
-        item.type === 'folder' && item.workspaceIds.includes(activeIdStr),
-    )
-
-    const overIsFolder = sidebarItems.find(
-      (item): item is SidebarFolder => item.type === 'folder' && item.id === overIdStr,
-    )
-
-    const overParentFolder = sidebarItems.find(
-      (item): item is SidebarFolder =>
-        item.type === 'folder' && item.workspaceIds.includes(overIdStr),
-    )
-
-    // Case 1: top-level workspace dragged onto a folder → move into folder
-    if (
-      !activeParentFolder &&
-      overIsFolder &&
-      activeTopIdx !== -1 &&
-      sidebarItems[activeTopIdx].type === 'workspace'
-    ) {
-      onMoveWorkspaceToFolder(activeIdStr, overIdStr)
-      return
-    }
-
-    // Case 2: workspace dragged out of folder to a top-level position
-    if (activeParentFolder && !overParentFolder && !overIsFolder) {
-      const overTopIdx = sidebarItems.findIndex(
-        (item) =>
-          (item.type === 'workspace' && item.workspaceId === overIdStr) ||
-          (item.type === 'folder' && item.id === overIdStr),
-      )
-      if (overTopIdx !== -1) {
-        onMoveWorkspaceToFolder(activeIdStr, null)
-        return
-      }
-    }
-
-    // Case 3: reorder within same folder
-    if (
-      activeParentFolder &&
-      overParentFolder &&
-      activeParentFolder.id === overParentFolder.id
-    ) {
-      const ids = activeParentFolder.workspaceIds
-      const oldIdx = ids.indexOf(activeIdStr)
-      const newIdx = ids.indexOf(overIdStr)
-      if (oldIdx !== -1 && newIdx !== -1) {
-        onReorderWorkspacesInFolder(activeParentFolder.id, arrayMove(ids, oldIdx, newIdx))
-      }
-      return
-    }
-
-    // Case 4: reorder top-level items
-    if (activeTopIdx !== -1) {
-      const overTopIdx = sidebarItems.findIndex(
-        (item) =>
-          (item.type === 'workspace' && item.workspaceId === overIdStr) ||
-          (item.type === 'folder' && item.id === overIdStr),
-      )
-      if (overTopIdx !== -1) {
-        onReorderSidebarItems(arrayMove(sidebarItems, activeTopIdx, overTopIdx))
-      }
-    }
-  }
-
-  const topLevelIds = sidebarItems.map((item) =>
-    item.type === 'folder' ? item.id : item.workspaceId,
-  )
-
-  function handleNewFolder() {
-    const folderCount = sidebarItems.filter((i) => i.type === 'folder').length
-    onCreateFolder(`Folder ${folderCount + 1}`)
-  }
-
-  const bgSessions = backgroundSessionIds
-    .map((id) => sessions.find((s) => s.id === id))
-    .filter(Boolean) as SessionSnapshot[]
-
-  return (
-    <div className="sidebar-body">
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragStart={handleDragStart}
-        onDragOver={handleDragOver}
-        onDragEnd={handleDragEnd}
-      >
-        <SortableContext items={topLevelIds} strategy={verticalListSortingStrategy}>
-          {sidebarItems.map((item) => {
-            if (item.type === 'folder') {
-              const folderWorkspaces = item.workspaceIds
-                .map((id) => wsMap.get(id))
-                .filter(Boolean) as Workspace[]
-              return (
-                <FolderRow
-                  key={item.id}
-                  folder={item}
-                  workspaces={folderWorkspaces}
-                  sMap={sMap}
-                  activeWorkspaceId={activeWorkspaceId}
-                  activeSessionId={activeSessionId}
-                  isDropTarget={overId === item.id}
-                  onSelectWorkspace={onSelectWorkspace}
-                  onDeleteWorkspace={onDeleteWorkspace}
-                  onRenameWorkspace={onRenameWorkspace}
-                  onSelectSession={onSelectSession}
-                  onKillSession={onKillSession}
-                  onToggle={() => onToggleFolder(item.id)}
-                  onRename={(name) => onRenameFolder(item.id, name)}
-                  onDelete={() => onDeleteFolder(item.id)}
-                />
-              )
-            }
-
-            const ws = wsMap.get(item.workspaceId)
-            if (!ws) return null
-            return (
+          <DragOverlay dropAnimation={null}>
+            {overlayWorkspace ? (
               <WorkspaceRow
-                key={ws.id}
-                workspace={ws}
+                workspace={overlayWorkspace}
                 sMap={sMap}
-                isActive={ws.id === activeWorkspaceId}
-                activeSessionId={activeSessionId}
-                onSelect={() => onSelectWorkspace(ws.id)}
-                onDelete={() => onDeleteWorkspace(ws.id)}
-                onRename={(name) => onRenameWorkspace(ws.id, name)}
-                onSelectSession={onSelectSession}
-                onKillSession={onKillSession}
-              />
-            )
-          })}
-        </SortableContext>
-
-        <DragOverlay dropAnimation={null}>
-          {activeId && activeDragItem ? (
-            activeDragItem.type === 'folder' ? (
-              <FolderRow
-                folder={activeDragItem as SidebarFolder}
-                workspaces={[]}
-                sMap={sMap}
-                activeWorkspaceId={activeWorkspaceId}
-                activeSessionId={activeSessionId}
-                isDropTarget={false}
-                isDragOverlay
-                onSelectWorkspace={() => {}}
-                onDeleteWorkspace={() => {}}
-                onRenameWorkspace={() => {}}
-                onSelectSession={() => {}}
-                onKillSession={() => {}}
-                onToggle={() => {}}
-                onRename={() => {}}
-                onDelete={() => {}}
-              />
-            ) : (
-              <WorkspaceRow
-                workspace={wsMap.get(activeId) ?? { id: activeId, name: '', sessionIds: [] }}
-                sMap={sMap}
-                isActive={activeId === activeWorkspaceId}
+                isActive={overlayWorkspace.id === activeWorkspaceId}
                 activeSessionId={activeSessionId}
                 isDragOverlay
                 onSelect={() => {}}
@@ -679,46 +445,58 @@ export function WorkspaceSidebar({
                 onSelectSession={() => {}}
                 onKillSession={() => {}}
               />
-            )
-          ) : null}
-        </DragOverlay>
-      </DndContext>
+            ) : overlaySession ? (
+              <SessionRow
+                session={overlaySession.session}
+                sessionId={overlaySession.sessionId!}
+                workspaceId={overlaySession.workspaceId}
+                isActiveSession={overlaySession.sessionId === activeSessionId}
+                isOpen
+                isDragOverlay
+                onSelect={() => {}}
+                onKill={() => {}}
+              />
+            ) : null}
+          </DragOverlay>
+        </DndContext>
+      </div>
 
-      {bgSessions.length > 0 && (
-        <div className="bg-sessions-section">
-          <div className="sidebar-section-label">Background</div>
-          {bgSessions.map((session) => (
-            <BackgroundSessionRow
-              key={session.id}
-              session={session}
-              onSelect={() => onSelectSession(session.id)}
-              onKill={() => onKillSession(session.id)}
-            />
-          ))}
+      <div className="shortcuts-bar">
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">New session</span>
+          <span className="shortcut-key">{mod}⇧N</span>
         </div>
-      )}
-
-      {sidebarItems.length === 0 && bgSessions.length === 0 && (
-        <div className="sidebar-empty">
-          <Terminal className="h-6 w-6 opacity-20" />
-          <span>No workspaces yet</span>
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">New workspace</span>
+          <span className="shortcut-key">{mod}⇧T</span>
         </div>
-      )}
-
-      <div className="sidebar-tree-actions">
-        <button className="sidebar-action-btn" onClick={onNewSession} type="button">
-          <Plus className="h-3.5 w-3.5" />
-          New terminal
-        </button>
-        <button className="sidebar-action-btn" onClick={onCreateWorkspace} type="button">
-          <Layers className="h-3.5 w-3.5" />
-          New workspace
-        </button>
-        <button className="sidebar-action-btn" onClick={handleNewFolder} type="button">
-          <FolderPlus className="h-3.5 w-3.5" />
-          New folder
-        </button>
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">Command palette</span>
+          <span className="shortcut-key">{mod}K</span>
+        </div>
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">Switch workspace</span>
+          <span className="shortcut-key">Alt ↑↓</span>
+        </div>
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">Switch tab</span>
+          <span className="shortcut-key">Alt ←→</span>
+        </div>
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">New session (+)</span>
+          <button className="shortcut-action-btn" onClick={onNewSession} type="button" title="New session">
+            <Plus className="h-3 w-3" />
+          </button>
+        </div>
+        <div className="shortcuts-bar-row">
+          <span className="shortcut-label">New workspace</span>
+          <button className="shortcut-action-btn" onClick={onCreateWorkspace} type="button" title="New workspace">
+            <Layers className="h-3 w-3" />
+          </button>
+        </div>
       </div>
     </div>
   )
 }
+
+
