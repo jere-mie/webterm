@@ -27,7 +27,8 @@ export type PaletteAction =
   | 'duplicate-session'
   | 'restart-session'
   | 'clear-terminal'
-  | 'close-session'
+  | 'hide-from-workspace'
+  | 'kill-session'
   | 'toggle-sidebar'
   | 'focus-terminal'
 
@@ -123,15 +124,24 @@ export function CommandPalette({
                 </span>
               </div>
             </CommandItem>
-            <CommandItem disabled={!activeSession} onSelect={() => runAction('close-session')}>
+            <CommandItem disabled={!activeSession} onSelect={() => runAction('hide-from-workspace')}>
               <X data-slot="command-icon" className="h-4 w-4" />
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="font-medium text-[var(--text-strong)]">Close active tab</span>
+                <span className="font-medium text-[var(--text-strong)]">Hide from workspace</span>
                 <span className="text-xs text-[var(--muted-strong)]">
-                  Terminate the PTY and remove the session from memory.
+                  Remove from current workspace; PTY keeps running in the background.
                 </span>
               </div>
               <span className="shortcut-chip">Ctrl W</span>
+            </CommandItem>
+            <CommandItem disabled={!activeSession} onSelect={() => runAction('kill-session')}>
+              <X data-slot="command-icon" className="h-4 w-4" />
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="font-medium text-[var(--text-strong)]">Kill session (PTY)</span>
+                <span className="text-xs text-[var(--muted-strong)]">
+                  Terminate the PTY process and remove the session from memory.
+                </span>
+              </div>
             </CommandItem>
           </CommandGroup>
           <CommandSeparator />

@@ -20,7 +20,7 @@ import { SessionManager } from './session-manager.js'
 
 const projectRoot = process.cwd()
 const host = '127.0.0.1'
-const defaultPort = 3001
+const defaultPort = parseInt(process.env.PORT ?? '3001', 10)
 
 const app = express()
 const httpServer = createHttpServer(app)

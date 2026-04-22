@@ -158,12 +158,30 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
         return false
       }
       if (isMod && event.key.toLowerCase() === 'w') {
-        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'close-session' }))
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
         return false
       }
       if (!isMod && event.shiftKey && event.key.toLowerCase() === 't') {
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
         return false
+      }
+      if (event.altKey && !isMod) {
+        if (event.key === 'ArrowUp') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-workspace' }))
+          return false
+        }
+        if (event.key === 'ArrowDown') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-next-workspace' }))
+          return false
+        }
+        if (event.key === 'ArrowLeft') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-tab' }))
+          return false
+        }
+        if (event.key === 'ArrowRight') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-next-tab' }))
+          return false
+        }
       }
 
       return true
@@ -173,6 +191,10 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
     void document.fonts.load('14px "JetBrainsMono Nerd Font"').then(() => {
       fitAndResize()
     })
+
+    // Refit when the sidebar is resized.
+    function handleRefit() { fitAndResize() }
+    window.addEventListener('webterm:refit', handleRefit)
 
     const inputSubscription = terminal.onData((data) => {
       socket.emit('input', {
@@ -186,6 +208,7 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
     })
 
     return () => {
+      window.removeEventListener('webterm:refit', handleRefit)
       inputSubscription.dispose()
       terminal.dispose()
       terminalRef.current = null

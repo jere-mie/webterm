@@ -15,7 +15,7 @@
 .sidebar {
   display: flex;
   flex-direction: column;
-  width: 248px;
+  width: var(--sidebar-w, 248px);
   flex-shrink: 0;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
@@ -592,6 +592,22 @@
   padding: 24px 16px;
 }
 
+/* ─── Sidebar resize handle ─── */
+
+.sidebar-resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 150ms ease;
+  z-index: 10;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer:active {
+  background: var(--accent);
+}
+
 /* ════════════════════════════════════════
    WORKSPACE
 ════════════════════════════════════════ */
@@ -634,6 +650,20 @@
 .mobile-menu-btn:hover {
   background: var(--surface);
   color: var(--text-strong);
+}
+
+.workspace-name-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
 }
 
 /* ─── Tabs ─── */
@@ -914,4 +944,308 @@
   .mobile-menu-btn {
     display: flex;
   }
+}
+
+/* ════════════════════════════════════════
+   WORKSPACE ITEMS (ws-*)
+════════════════════════════════════════ */
+
+.ws-item {
+  margin: 1px 6px;
+  border-radius: 5px;
+}
+
+.ws-item.is-active > .ws-item-header {
+  background: var(--accent-bg);
+}
+
+.ws-item.is-drag-overlay {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  opacity: 0.95;
+  background: var(--surface-hover);
+  border-radius: 5px;
+}
+
+.ws-item-header {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 4px 6px 4px 0;
+  border-radius: 5px;
+  transition: background 120ms ease;
+}
+
+.ws-item-header:hover {
+  background: var(--surface);
+}
+
+.ws-item-header.is-active:hover {
+  background: color-mix(in srgb, var(--accent-bg), var(--surface) 30%);
+}
+
+.ws-item-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 0;
+}
+
+.ws-item-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: var(--text);
+  padding: 2px 4px 2px 0;
+  transition: color 120ms ease;
+}
+
+.ws-item.is-active .ws-item-name {
+  color: var(--accent-bright);
+}
+
+.ws-item-name:hover {
+  color: var(--text-strong);
+}
+
+.ws-icon {
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.ws-item.is-active .ws-icon {
+  color: var(--accent);
+}
+
+.ws-item-name-text {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-session-count {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.ws-state-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin: 0 3px;
+}
+
+.ws-active-badge {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 3px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.ws-delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 0;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+  border-radius: 4px;
+}
+
+.ws-item-header:hover .ws-delete-btn {
+  opacity: 1;
+}
+
+.ws-delete-btn:hover {
+  color: var(--state-exited);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.ws-rename-input {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--accent-border);
+  border-radius: 4px;
+  color: var(--text-strong);
+  font-size: 12px;
+  padding: 2px 6px;
+  outline: none;
+  min-width: 0;
+}
+
+.ws-sessions {
+  padding-bottom: 4px;
+}
+
+.ws-empty-hint {
+  margin: 2px 12px 2px 28px;
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  text-align: center;
+}
+
+/* ─── Session rows inside workspaces ─── */
+
+.ws-session-item {
+  display: flex;
+  align-items: stretch;
+  margin: 1px 4px 1px 24px;
+  border-radius: 4px;
+  border-left: 2px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.ws-session-item:hover {
+  background: var(--surface);
+}
+
+.ws-session-item.is-active {
+  background: var(--accent-bg);
+  border-left-color: var(--accent);
+}
+
+.ws-session-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 4px 5px 6px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: inherit;
+}
+
+.ws-session-info {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ws-session-title {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+
+.ws-session-item.is-active .ws-session-title {
+  color: var(--accent-bright);
+}
+
+.ws-session-path {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+
+.ws-session-kill {
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+
+.ws-session-item:hover .ws-session-kill,
+.ws-session-item.is-active .ws-session-kill {
+  opacity: 1;
+}
+
+.ws-session-kill:hover {
+  color: var(--state-exited);
+}
+
+/* ════════════════════════════════════════
+   BACKGROUND SESSIONS
+════════════════════════════════════════ */
+
+.bg-sessions-section {
+  margin-top: auto;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 4px 0;
+}
+
+.bg-sessions-label {
+  padding: 6px 16px 2px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.bg-session-item {
+  display: flex;
+  align-items: stretch;
+  margin: 1px 6px;
+  border-radius: 4px;
+  transition: background 120ms ease;
+}
+
+.bg-session-item:hover {
+  background: var(--surface);
+}
+
+.bg-session-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 4px 5px 8px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: inherit;
 }
