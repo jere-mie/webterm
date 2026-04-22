@@ -330,15 +330,15 @@ function App() {
         void spawnSession()
       }
 
-      // Alt+W → new workspace
-      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyW') {
+      // Alt+M → new workspace
+      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyM') {
         event.preventDefault()
         const id = createWorkspace()
         setActiveWorkspace(id)
       }
 
-      // Ctrl/Cmd+W → close active tab
-      if (commandKey && !event.shiftKey && event.key.toLowerCase() === 'w' && activeSessionId) {
+      // Alt+W → close active tab
+      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyW' && activeSessionId) {
         event.preventDefault()
         closeTab(activeSessionId)
       }

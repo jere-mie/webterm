@@ -683,7 +683,8 @@ export function WorkspaceSidebar({
           <span>Alt↑↓ workspace</span>
           <span>Alt←→ tab</span>
           <span>{mod}K palette</span>
-          <span>{mod}W close tab</span>
+          <span>Alt+M new workspace</span>
+          <span>Alt+W close tab</span>
         </div>
         <div className="shortcuts-actions">
           <button className="sidebar-create-btn" onClick={onNewSession} type="button">
@@ -694,7 +695,7 @@ export function WorkspaceSidebar({
           <button className="sidebar-create-btn" onClick={onCreateWorkspace} type="button">
             <Layers className="h-3.5 w-3.5 shrink-0" />
             <span>New Workspace</span>
-            <span className="btn-shortcut">Alt W</span>
+            <span className="btn-shortcut">Alt M</span>
           </button>
         </div>
       </div>

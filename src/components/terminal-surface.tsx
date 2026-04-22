@@ -161,14 +161,18 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
         return false
       }
-      // Alt+N / Alt+W — use event.code to be layout-independent (avoids macOS dead key issue)
+      // Alt+N / Alt+M — use event.code to be layout-independent
       if (event.altKey && !isMod) {
-        if (event.code === 'KeyN') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
+        if (event.code === 'KeyW') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
           return false
         }
-        if (event.code === 'KeyW') {
+        if (event.code === 'KeyM') {
           window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-workspace' }))
+          return false
+        }
+        if (event.code === 'KeyN') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
           return false
         }
         if (event.key === 'ArrowUp') {
