@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   DndContext,
@@ -17,13 +17,11 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { ChevronDown, ChevronRight, Layers, Pencil, Plus, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, Layers, Plus, X } from 'lucide-react'
 
 import type { SessionSnapshot } from '../../shared/protocol'
 import type { Workspace } from '../hooks/useAppState'
-import { cn } from '../lib/utils'
-
-const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
+import { cn, formatShortcut } from '../lib/utils'
 
 interface DragData {
   type: 'workspace' | 'session'
@@ -45,6 +43,8 @@ interface WorkspaceSidebarProps {
   sessions: SessionSnapshot[]
   activeWorkspaceId: string | null
   activeSessionId: string | null
+  renamingWorkspaceId: string | null
+  onRenamingWorkspaceChange: (workspaceId: string | null) => void
   onSelectWorkspace: (workspaceId: string) => void
   onDeleteWorkspace: (workspaceId: string) => void
   onRenameWorkspace: (workspaceId: string, name: string) => void
@@ -53,15 +53,26 @@ interface WorkspaceSidebarProps {
   onKillSession: (sessionId: string) => void
   onCloseTab: (sessionId: string) => void
   onRenameSession: (sessionId: string, title: string) => void
-  onNewSession: () => void
+  onNewSession: (workspaceId?: string) => void
   onReorderWorkspaces: (newWorkspaceIds: string[]) => void
-  onReorderSessionsInWorkspace: (workspaceId: string, newSessionIds: string[]) => void
-  onMoveSessionToWorkspace: (sessionId: string, targetWorkspaceId: string, atIndex?: number) => void
+  onReorderSessionsInWorkspace: (
+    workspaceId: string,
+    newSessionIds: string[],
+  ) => void
+  onMoveSessionToWorkspace: (
+    sessionId: string,
+    targetWorkspaceId: string,
+    atIndex?: number,
+  ) => void
 }
 
 function sessionMap(sessions: SessionSnapshot[]): Map<string, SessionSnapshot> {
   const map = new Map<string, SessionSnapshot>()
-  for (const s of sessions) map.set(s.id, s)
+
+  for (const session of sessions) {
+    map.set(session.id, session)
+  }
+
   return map
 }
 
@@ -72,22 +83,37 @@ function worstState(
   let hasExited = false
   let hasDetached = false
   let hasLive = false
-  for (const id of sessionIds) {
-    const s = map.get(id)
-    if (!s) continue
-    if (s.state === 'exited') hasExited = true
-    else if (s.state === 'detached') hasDetached = true
-    else if (s.state === 'live') hasLive = true
+
+  for (const sessionId of sessionIds) {
+    const session = map.get(sessionId)
+
+    if (!session) {
+      continue
+    }
+
+    if (session.state === 'exited') {
+      hasExited = true
+    } else if (session.state === 'detached') {
+      hasDetached = true
+    } else if (session.state === 'live') {
+      hasLive = true
+    }
   }
-  if (hasExited) return 'exited'
-  if (hasDetached) return 'detached'
-  if (hasLive) return 'live'
+
+  if (hasExited) {
+    return 'exited'
+  }
+
+  if (hasDetached) {
+    return 'detached'
+  }
+
+  if (hasLive) {
+    return 'live'
+  }
+
   return null
 }
-
-// ─────────────────────────────────────────────────────
-// Session row (sortable, supports open/closed state, inline rename)
-// ─────────────────────────────────────────────────────
 
 interface SessionRowProps {
   session: SessionSnapshot | undefined
@@ -101,7 +127,7 @@ interface SessionRowProps {
   onKill: () => void
   onRenameCommit: (title: string) => void
   onRenameCancel: () => void
-  onContextMenu: (e: React.MouseEvent) => void
+  onContextMenu: (event: React.MouseEvent) => void
 }
 
 function SessionRow({
@@ -118,64 +144,73 @@ function SessionRow({
   onRenameCancel,
   onContextMenu,
 }: SessionRowProps) {
-  const [renameValue, setRenameValue] = useState('')
   const renameInputRef = useRef<HTMLInputElement>(null)
-
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({
       id: sessionId,
       data: { type: 'session', sessionId, workspaceId } satisfies DragData,
     })
 
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.3 : 1,
-  }
-
   useEffect(() => {
-    if (isRenaming) {
-      setRenameValue(session?.title ?? sessionId)
-      requestAnimationFrame(() => {
-        renameInputRef.current?.select()
-      })
+    if (!isRenaming) {
+      return
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
+    requestAnimationFrame(() => {
+      renameInputRef.current?.select()
+    })
   }, [isRenaming])
 
   function commitRename() {
-    const trimmed = renameValue.trim()
-    if (trimmed) onRenameCommit(trimmed)
-    else onRenameCancel()
+    const trimmed = renameInputRef.current?.value.trim() ?? ''
+
+    if (trimmed) {
+      onRenameCommit(trimmed)
+      return
+    }
+
+    onRenameCancel()
   }
 
   return (
     <div
       ref={setNodeRef}
-      style={style}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.3 : 1,
+      }}
       className={cn(
         'ws-session-item',
         isActiveSession && 'is-active',
         !isOpen && 'is-closed',
         isDragOverlay && 'is-drag-overlay',
       )}
-      {...listeners}
       {...attributes}
+      {...listeners}
       onContextMenu={onContextMenu}
     >
       {isRenaming ? (
         <input
           ref={renameInputRef}
+          key={`${sessionId}:${session?.title ?? sessionId}`}
           autoFocus
           className="ws-rename-input ws-session-rename-input"
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
+          defaultValue={session?.title ?? sessionId}
+          id={`session-rename-${sessionId}`}
+          name={`session-rename-${sessionId}`}
           onBlur={commitRename}
-          onPointerDown={(e) => e.stopPropagation()}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') commitRename()
-            if (e.key === 'Escape') onRenameCancel()
-            e.stopPropagation()
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              commitRename()
+            }
+
+            if (event.key === 'Escape') {
+              onRenameCancel()
+            }
+
+            event.stopPropagation()
           }}
         />
       ) : (
@@ -183,7 +218,6 @@ function SessionRow({
           <button
             className="ws-session-main"
             onClick={onSelect}
-            onPointerDown={(e) => e.stopPropagation()}
             type="button"
           >
             <span
@@ -201,9 +235,9 @@ function SessionRow({
             aria-label={`Kill ${session?.title ?? sessionId}`}
             className="ws-session-kill"
             onClick={onKill}
-            onPointerDown={(e) => e.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+            title={`Kill session (${formatShortcut(['Alt', 'Shift', 'W'])})`}
             type="button"
-            title="Kill process"
           >
             <X className="h-3 w-3" />
           </button>
@@ -212,10 +246,6 @@ function SessionRow({
     </div>
   )
 }
-
-// ─────────────────────────────────────────────────────
-// Workspace row (sortable, header-only drag)
-// ─────────────────────────────────────────────────────
 
 interface WorkspaceRowProps {
   workspace: Workspace
@@ -227,16 +257,16 @@ interface WorkspaceRowProps {
   renamingSessionId: string | null
   onSelect: () => void
   onDelete: () => void
+  onNewSession: () => void
+  onStartRename: () => void
   onRenameCommit: (name: string) => void
   onRenameCancel: () => void
   onSelectSession: (sessionId: string) => void
   onKillSession: (sessionId: string) => void
-  onCloseTab: (sessionId: string) => void
-  onRenameSession: (sessionId: string, title: string) => void
   onSessionRenameCommit: (sessionId: string, title: string) => void
   onSessionRenameCancel: () => void
-  onContextMenu: (e: React.MouseEvent) => void
-  onSessionContextMenu: (e: React.MouseEvent, sessionId: string) => void
+  onContextMenu: (event: React.MouseEvent) => void
+  onSessionContextMenu: (event: React.MouseEvent, sessionId: string) => void
 }
 
 function WorkspaceRow({
@@ -249,6 +279,8 @@ function WorkspaceRow({
   renamingSessionId,
   onSelect,
   onDelete,
+  onNewSession,
+  onStartRename,
   onRenameCommit,
   onRenameCancel,
   onSelectSession,
@@ -259,85 +291,102 @@ function WorkspaceRow({
   onSessionContextMenu,
 }: WorkspaceRowProps) {
   const [expanded, setExpanded] = useState(true)
-  const [renameValue, setRenameValue] = useState(workspace.name)
   const renameInputRef = useRef<HTMLInputElement>(null)
-
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
-    useSortable({
-      id: `ws:${workspace.id}`,
-      data: { type: 'workspace', workspaceId: workspace.id } satisfies DragData,
-    })
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
     transition,
-    opacity: isDragging ? 0.3 : 1,
-  }
+    isDragging,
+  } = useSortable({
+    id: `ws:${workspace.id}`,
+    data: { type: 'workspace', workspaceId: workspace.id } satisfies DragData,
+  })
 
   useEffect(() => {
-    if (isRenaming) {
-      setRenameValue(workspace.name)
-      requestAnimationFrame(() => {
-        renameInputRef.current?.select()
-      })
+    if (!isRenaming) {
+      return
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
+    requestAnimationFrame(() => {
+      renameInputRef.current?.select()
+    })
   }, [isRenaming])
 
-  const wsState = worstState(workspace.sessionIds, sMap)
-
   function commitRename() {
-    const trimmed = renameValue.trim()
-    if (trimmed) onRenameCommit(trimmed)
-    else onRenameCancel()
+    const trimmed = renameInputRef.current?.value.trim() ?? ''
+
+    if (trimmed) {
+      onRenameCommit(trimmed)
+      return
+    }
+
+    onRenameCancel()
   }
+
+  const workspaceState = worstState(workspace.sessionIds, sMap)
 
   return (
     <div
       ref={setNodeRef}
-      style={style}
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.3 : 1,
+      }}
       className={cn('ws-item', isActive && 'is-active', isDragOverlay && 'is-drag-overlay')}
     >
       <div
         ref={setActivatorNodeRef}
         className={cn('ws-item-header', isActive && 'is-active', isRenaming && 'is-renaming')}
-        {...listeners}
         {...attributes}
+        {...listeners}
         onContextMenu={onContextMenu}
       >
         <button
           className="ws-item-toggle"
-          onClick={() => setExpanded((e) => !e)}
-          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => setExpanded((current) => !current)}
+          onPointerDown={(event) => event.stopPropagation()}
           tabIndex={-1}
           type="button"
         >
-          {expanded
-            ? <ChevronDown className="h-3.5 w-3.5" />
-            : <ChevronRight className="h-3.5 w-3.5" />}
+          {expanded ? (
+            <ChevronDown className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
         </button>
 
         {isRenaming ? (
           <input
             ref={renameInputRef}
+            key={`${workspace.id}:${workspace.name}`}
             autoFocus
-            className="ws-rename-input"
-            value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
+            className="ws-rename-input ws-workspace-rename-input"
+            defaultValue={workspace.name}
+            id={`workspace-rename-${workspace.id}`}
+            name={`workspace-rename-${workspace.id}`}
             onBlur={commitRename}
-            onPointerDown={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitRename()
-              if (e.key === 'Escape') onRenameCancel()
-              e.stopPropagation()
+            onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                commitRename()
+              }
+
+              if (event.key === 'Escape') {
+                onRenameCancel()
+              }
+
+              event.stopPropagation()
             }}
           />
         ) : (
           <button
             className="ws-item-name"
             onClick={onSelect}
-            onDoubleClick={() => { setRenameValue(workspace.name) }}
-            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={onStartRename}
             type="button"
           >
             <Layers className="h-3.5 w-3.5 ws-icon" />
@@ -348,14 +397,23 @@ function WorkspaceRow({
           </button>
         )}
 
-        {wsState && <span className={cn('ws-state-dot', `state-${wsState}`)} />}
-        {isActive && <span className="ws-active-badge">active</span>}
+        {workspaceState && <span className={cn('ws-state-dot', `state-${workspaceState}`)} />}
 
+        <button
+          aria-label={`Create a new session in ${workspace.name}`}
+          className="ws-new-session-btn"
+          onClick={onNewSession}
+          onPointerDown={(event) => event.stopPropagation()}
+          title={`New session in ${workspace.name} (${formatShortcut(['Alt', 'N'])})`}
+          type="button"
+        >
+          <Plus className="h-3 w-3" />
+        </button>
         <button
           aria-label={`Delete ${workspace.name}`}
           className="ws-delete-btn"
           onClick={onDelete}
-          onPointerDown={(e) => e.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
           type="button"
         >
           <X className="h-3 w-3" />
@@ -378,11 +436,13 @@ function WorkspaceRow({
                 onKill={() => onKillSession(sessionId)}
                 onRenameCommit={(title) => onSessionRenameCommit(sessionId, title)}
                 onRenameCancel={onSessionRenameCancel}
-                onContextMenu={(e) => onSessionContextMenu(e, sessionId)}
+                onContextMenu={(event) => onSessionContextMenu(event, sessionId)}
               />
             ))}
             {workspace.sessionIds.length === 0 && (
-              <div className="ws-empty-hint">No sessions — right-click or press Alt+N</div>
+              <div className="ws-empty-hint">
+                No sessions — use the + button or press {formatShortcut(['Alt', 'N'])}
+              </div>
             )}
           </div>
         </SortableContext>
@@ -391,22 +451,16 @@ function WorkspaceRow({
   )
 }
 
-// ─────────────────────────────────────────────────────
-// Context menu portal
-// ─────────────────────────────────────────────────────
-
 interface ContextMenuProps {
   menu: CtxMenu
-  workspaces: Workspace[]
   onClose: () => void
   onStartRename: () => void
   onStartSessionRename: () => void
-  onSelectSession: (id: string) => void
-  onCloseTab: (id: string) => void
-  onKillSession: (id: string) => void
-  onDeleteWorkspace: (id: string) => void
+  onSelectSession: (sessionId: string) => void
+  onCloseTab: (sessionId: string) => void
+  onKillSession: (sessionId: string) => void
+  onDeleteWorkspace: (workspaceId: string) => void
   onNewSessionInWorkspace: () => void
-  onOpenNewSession: () => void
 }
 
 function ContextMenu({
@@ -423,34 +477,40 @@ function ContextMenu({
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    function handleDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose()
+    function handleMouseDown(event: MouseEvent) {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        onClose()
+      }
     }
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose()
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose()
+      }
     }
-    document.addEventListener('mousedown', handleDown)
-    document.addEventListener('keydown', handleKey)
+
+    document.addEventListener('mousedown', handleMouseDown)
+    document.addEventListener('keydown', handleKeyDown)
+
     return () => {
-      document.removeEventListener('mousedown', handleDown)
-      document.removeEventListener('keydown', handleKey)
+      document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('keydown', handleKeyDown)
     }
   }, [onClose])
-
-  const style: React.CSSProperties = {
-    position: 'fixed',
-    left: menu.x,
-    top: menu.y,
-    zIndex: 9999,
-  }
 
   function item(label: string, action: () => void, danger = false) {
     return (
       <button
         key={label}
         className={cn('ctx-menu-item', danger && 'danger')}
-        onPointerDown={(e) => { e.stopPropagation(); e.preventDefault() }}
-        onClick={() => { action(); onClose() }}
+        onClick={() => {
+          action()
+          onClose()
+        }}
+        onPointerDown={(event) => {
+          event.preventDefault()
+          event.stopPropagation()
+        }}
         type="button"
       >
         {label}
@@ -459,14 +519,17 @@ function ContextMenu({
   }
 
   return createPortal(
-    <div ref={ref} className="ctx-menu" style={style}>
+    <div
+      ref={ref}
+      className="ctx-menu"
+      style={{ left: menu.x, position: 'fixed', top: menu.y, zIndex: 9999 }}
+    >
       {menu.type === 'session' ? (
         <>
           {item('Rename', onStartSessionRename)}
           {menu.isOpen
             ? item('Close tab', () => onCloseTab(menu.id))
-            : item('Open as tab', () => onSelectSession(menu.id))
-          }
+            : item('Open as tab', () => onSelectSession(menu.id))}
           <div className="ctx-menu-sep" />
           {item('Kill session', () => onKillSession(menu.id), true)}
         </>
@@ -483,15 +546,13 @@ function ContextMenu({
   )
 }
 
-// ─────────────────────────────────────────────────────
-// Main WorkspaceSidebar
-// ─────────────────────────────────────────────────────
-
 export function WorkspaceSidebar({
   workspaces,
   sessions,
   activeWorkspaceId,
   activeSessionId,
+  renamingWorkspaceId,
+  onRenamingWorkspaceChange,
   onSelectWorkspace,
   onDeleteWorkspace,
   onRenameWorkspace,
@@ -509,18 +570,31 @@ export function WorkspaceSidebar({
   const [activeDragData, setActiveDragData] = useState<DragData | null>(null)
   const [ctxMenu, setCtxMenu] = useState<CtxMenu | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
-  const [renamingWsId, setRenamingWsId] = useState<string | null>(null)
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   )
 
-  function openCtxMenu(e: React.MouseEvent, type: CtxMenu['type'], id: string, workspaceId: string) {
-    e.preventDefault()
-    e.stopPropagation()
-    const ws = workspaces.find((w) => w.id === workspaceId)
-    const isOpen = ws ? ws.openSessionIds.includes(id) : false
-    setCtxMenu({ type, id, workspaceId, isOpen, x: e.clientX, y: e.clientY })
+  function openCtxMenu(
+    event: React.MouseEvent,
+    type: CtxMenu['type'],
+    id: string,
+    workspaceId: string,
+  ) {
+    event.preventDefault()
+    event.stopPropagation()
+
+    const workspace = workspaces.find((candidate) => candidate.id === workspaceId)
+    const isOpen = workspace ? workspace.openSessionIds.includes(id) : false
+
+    setCtxMenu({
+      type,
+      id,
+      workspaceId,
+      isOpen,
+      x: event.clientX,
+      y: event.clientY,
+    })
   }
 
   function handleDragStart({ active }: DragStartEvent) {
@@ -530,71 +604,114 @@ export function WorkspaceSidebar({
 
   function handleDragEnd({ active, over }: DragEndEvent) {
     setActiveDragData(null)
-    if (!over || active.id === over.id) return
+
+    if (!over || active.id === over.id) {
+      return
+    }
 
     const activeData = active.data.current as DragData | undefined
     const overData = over.data.current as DragData | undefined
 
-    if (!activeData) return
+    if (!activeData) {
+      return
+    }
 
     if (activeData.type === 'workspace') {
-      const overWsId = overData?.workspaceId ?? (
-        typeof over.id === 'string' && over.id.startsWith('ws:') ? over.id.slice(3) : null
-      )
-      if (!overWsId) return
-      const currentOrder = workspaces.map((w) => w.id)
-      const oldIdx = currentOrder.indexOf(activeData.workspaceId)
-      const newIdx = currentOrder.indexOf(overWsId)
-      if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
-        onReorderWorkspaces(arrayMove(currentOrder, oldIdx, newIdx))
-      }
-    } else if (activeData.type === 'session') {
-      const sessionId = activeData.sessionId!
-      const sourceWsId = activeData.workspaceId
+      const overWorkspaceId =
+        overData?.workspaceId ??
+        (typeof over.id === 'string' && over.id.startsWith('ws:')
+          ? over.id.slice(3)
+          : null)
 
-      if (overData?.type === 'session') {
-        const targetWsId = overData.workspaceId
-        if (sourceWsId === targetWsId) {
-          const ws = workspaces.find((w) => w.id === sourceWsId)
-          if (!ws) return
-          const oldIdx = ws.sessionIds.indexOf(sessionId)
-          const newIdx = ws.sessionIds.indexOf(over.id as string)
-          if (oldIdx !== -1 && newIdx !== -1 && oldIdx !== newIdx) {
-            onReorderSessionsInWorkspace(sourceWsId, arrayMove(ws.sessionIds, oldIdx, newIdx))
-          }
-        } else {
-          const targetWs = workspaces.find((w) => w.id === targetWsId)
-          if (!targetWs) return
-          const atIndex = targetWs.sessionIds.indexOf(over.id as string)
-          onMoveSessionToWorkspace(sessionId, targetWsId, atIndex === -1 ? undefined : atIndex)
-        }
-      } else if (overData?.type === 'workspace') {
-        const targetWsId = overData.workspaceId
-        if (sourceWsId !== targetWsId) {
-          onMoveSessionToWorkspace(sessionId, targetWsId)
-        }
-      } else if (typeof over.id === 'string' && over.id.startsWith('ws:')) {
-        const targetWsId = over.id.slice(3)
-        if (sourceWsId !== targetWsId) {
-          onMoveSessionToWorkspace(sessionId, targetWsId)
-        }
+      if (!overWorkspaceId) {
+        return
       }
+
+      const currentOrder = workspaces.map((workspace) => workspace.id)
+      const oldIndex = currentOrder.indexOf(activeData.workspaceId)
+      const newIndex = currentOrder.indexOf(overWorkspaceId)
+
+      if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+        onReorderWorkspaces(arrayMove(currentOrder, oldIndex, newIndex))
+      }
+
+      return
+    }
+
+    const sessionId = activeData.sessionId
+
+    if (!sessionId) {
+      return
+    }
+
+    if (overData?.type === 'session') {
+      if (activeData.workspaceId === overData.workspaceId) {
+        const workspace = workspaces.find(
+          (candidate) => candidate.id === activeData.workspaceId,
+        )
+
+        if (!workspace) {
+          return
+        }
+
+        const oldIndex = workspace.sessionIds.indexOf(sessionId)
+        const newIndex = workspace.sessionIds.indexOf(over.id as string)
+
+        if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+          onReorderSessionsInWorkspace(
+            activeData.workspaceId,
+            arrayMove(workspace.sessionIds, oldIndex, newIndex),
+          )
+        }
+
+        return
+      }
+
+      const targetWorkspace = workspaces.find(
+        (candidate) => candidate.id === overData.workspaceId,
+      )
+
+      if (!targetWorkspace) {
+        return
+      }
+
+      const targetIndex = targetWorkspace.sessionIds.indexOf(over.id as string)
+
+      onMoveSessionToWorkspace(
+        sessionId,
+        overData.workspaceId,
+        targetIndex === -1 ? undefined : targetIndex,
+      )
+      return
+    }
+
+    const targetWorkspaceId =
+      overData?.type === 'workspace'
+        ? overData.workspaceId
+        : typeof over.id === 'string' && over.id.startsWith('ws:')
+          ? over.id.slice(3)
+          : null
+
+    if (targetWorkspaceId && targetWorkspaceId !== activeData.workspaceId) {
+      onMoveSessionToWorkspace(sessionId, targetWorkspaceId)
     }
   }
 
-  const workspaceIds = workspaces.map((w) => `ws:${w.id}`)
-
-  const overlayWorkspace = activeDragData?.type === 'workspace'
-    ? workspaces.find((w) => w.id === activeDragData.workspaceId)
+  const workspaceIds = workspaces.map((workspace) => `ws:${workspace.id}`)
+  const overlayWorkspace =
+    activeDragData?.type === 'workspace'
+      ? workspaces.find((workspace) => workspace.id === activeDragData.workspaceId) ?? null
+      : null
+  const overlaySession =
+    activeDragData?.type === 'session'
+      ? {
+          session: sMap.get(activeDragData.sessionId ?? ''),
+          ...activeDragData,
+        }
+      : null
+  const ctxWorkspace = ctxMenu
+    ? workspaces.find((workspace) => workspace.id === ctxMenu.workspaceId) ?? null
     : null
-  const overlaySession = activeDragData?.type === 'session'
-    ? { session: sMap.get(activeDragData.sessionId!), ...activeDragData }
-    : null
-
-  const mod = isMac ? '⌘' : 'Ctrl'
-
-  // Context menu actions
-  const ctxWorkspace = ctxMenu ? workspaces.find((w) => w.id === ctxMenu.workspaceId) : null
 
   return (
     <div className="sidebar-body">
@@ -606,30 +723,37 @@ export function WorkspaceSidebar({
           onDragEnd={handleDragEnd}
         >
           <SortableContext items={workspaceIds} strategy={verticalListSortingStrategy}>
-            {workspaces.map((ws) => (
+            {workspaces.map((workspace) => (
               <WorkspaceRow
-                key={ws.id}
-                workspace={ws}
+                key={workspace.id}
+                workspace={workspace}
                 sMap={sMap}
-                isActive={ws.id === activeWorkspaceId}
+                isActive={workspace.id === activeWorkspaceId}
                 activeSessionId={activeSessionId}
-                isRenaming={renamingWsId === ws.id}
+                isRenaming={renamingWorkspaceId === workspace.id}
                 renamingSessionId={renamingSessionId}
-                onSelect={() => onSelectWorkspace(ws.id)}
-                onDelete={() => onDeleteWorkspace(ws.id)}
-                onRenameCommit={(name) => { onRenameWorkspace(ws.id, name); setRenamingWsId(null) }}
-                onRenameCancel={() => setRenamingWsId(null)}
+                onSelect={() => onSelectWorkspace(workspace.id)}
+                onDelete={() => onDeleteWorkspace(workspace.id)}
+                onNewSession={() => onNewSession(workspace.id)}
+                onStartRename={() => onRenamingWorkspaceChange(workspace.id)}
+                onRenameCommit={(name) => {
+                  onRenameWorkspace(workspace.id, name)
+                  onRenamingWorkspaceChange(null)
+                }}
+                onRenameCancel={() => onRenamingWorkspaceChange(null)}
                 onSelectSession={onSelectSession}
                 onKillSession={onKillSession}
-                onCloseTab={onCloseTab}
-                onRenameSession={onRenameSession}
                 onSessionRenameCommit={(sessionId, title) => {
                   onRenameSession(sessionId, title)
                   setRenamingSessionId(null)
                 }}
                 onSessionRenameCancel={() => setRenamingSessionId(null)}
-                onContextMenu={(e) => openCtxMenu(e, 'workspace', ws.id, ws.id)}
-                onSessionContextMenu={(e, sessionId) => openCtxMenu(e, 'session', sessionId, ws.id)}
+                onContextMenu={(event) =>
+                  openCtxMenu(event, 'workspace', workspace.id, workspace.id)
+                }
+                onSessionContextMenu={(event, sessionId) =>
+                  openCtxMenu(event, 'session', sessionId, workspace.id)
+                }
               />
             ))}
           </SortableContext>
@@ -646,12 +770,12 @@ export function WorkspaceSidebar({
                 isDragOverlay
                 onSelect={() => {}}
                 onDelete={() => {}}
+                onNewSession={() => {}}
+                onStartRename={() => {}}
                 onRenameCommit={() => {}}
                 onRenameCancel={() => {}}
                 onSelectSession={() => {}}
                 onKillSession={() => {}}
-                onCloseTab={() => {}}
-                onRenameSession={() => {}}
                 onSessionRenameCommit={() => {}}
                 onSessionRenameCancel={() => {}}
                 onContextMenu={() => {}}
@@ -660,7 +784,7 @@ export function WorkspaceSidebar({
             ) : overlaySession ? (
               <SessionRow
                 session={overlaySession.session}
-                sessionId={overlaySession.sessionId!}
+                sessionId={overlaySession.sessionId ?? ''}
                 workspaceId={overlaySession.workspaceId}
                 isActiveSession={overlaySession.sessionId === activeSessionId}
                 isOpen
@@ -677,47 +801,84 @@ export function WorkspaceSidebar({
         </DndContext>
       </div>
 
-      {/* Bottom action bar */}
       <div className="shortcuts-bar">
         <div className="shortcuts-legend">
-          <span>Alt↑↓ workspace</span>
-          <span>Alt←→ tab</span>
-          <span>{mod}K palette</span>
-          <span>Alt+M new workspace</span>
-          <span>Alt+W close tab</span>
+          <span>{formatShortcut(['Alt', '↑↓'])} workspace</span>
+          <span>{formatShortcut(['Alt', '←→'])} tab</span>
+          <span>{formatShortcut(['Alt', 'Shift', '↑↓'])} move ws</span>
+          <span>{formatShortcut(['Alt', 'Shift', '←→'])} move tab</span>
+          <span>{formatShortcut(['Alt', 'K'])} palette</span>
+          <span>{formatShortcut(['Alt', 'M'])} new ws</span>
+          <span>{formatShortcut(['Alt', 'W'])} close</span>
+          <span>{formatShortcut(['Alt', 'Shift', 'W'])} kill</span>
         </div>
         <div className="shortcuts-actions">
-          <button className="sidebar-create-btn" onClick={onNewSession} type="button">
+          <button className="sidebar-create-btn" onClick={() => onNewSession()} type="button">
             <Plus className="h-3.5 w-3.5 shrink-0" />
             <span>New Session</span>
-            <span className="btn-shortcut">Alt N</span>
+            <span className="btn-shortcut">{formatShortcut(['Alt', 'N'])}</span>
           </button>
           <button className="sidebar-create-btn" onClick={onCreateWorkspace} type="button">
             <Layers className="h-3.5 w-3.5 shrink-0" />
             <span>New Workspace</span>
-            <span className="btn-shortcut">Alt M</span>
+            <span className="btn-shortcut">{formatShortcut(['Alt', 'M'])}</span>
           </button>
+        </div>
+        <div className="sidebar-credit">
+          <span>
+            Made by{' '}
+            <a
+              href="https://jeremie.bornais.ca"
+              rel="noreferrer"
+              target="_blank"
+            >
+              Jeremie Bornais
+            </a>
+          </span>
+          <a
+            href="https://github.com/jere-mie/webterm"
+            rel="noreferrer"
+            target="_blank"
+          >
+            GitHub
+          </a>
         </div>
       </div>
 
-      {/* Context menu portal */}
       {ctxMenu && (
         <ContextMenu
           menu={ctxMenu}
-          workspaces={workspaces}
           onClose={() => setCtxMenu(null)}
-          onStartRename={() => { setRenamingWsId(ctxMenu.id); setCtxMenu(null) }}
-          onStartSessionRename={() => { setRenamingSessionId(ctxMenu.id); setCtxMenu(null) }}
-          onSelectSession={(id) => { onSelectSession(id); setCtxMenu(null) }}
-          onCloseTab={(id) => { onCloseTab(id); setCtxMenu(null) }}
-          onKillSession={(id) => { onKillSession(id); setCtxMenu(null) }}
-          onDeleteWorkspace={(id) => { onDeleteWorkspace(id); setCtxMenu(null) }}
-          onNewSessionInWorkspace={() => {
-            if (ctxWorkspace) onSelectWorkspace(ctxWorkspace.id)
-            onNewSession()
+          onStartRename={() => {
+            onRenamingWorkspaceChange(ctxMenu.id)
             setCtxMenu(null)
           }}
-          onOpenNewSession={() => { onNewSession(); setCtxMenu(null) }}
+          onStartSessionRename={() => {
+            setRenamingSessionId(ctxMenu.id)
+            setCtxMenu(null)
+          }}
+          onSelectSession={(sessionId) => {
+            onSelectSession(sessionId)
+            setCtxMenu(null)
+          }}
+          onCloseTab={(sessionId) => {
+            onCloseTab(sessionId)
+            setCtxMenu(null)
+          }}
+          onKillSession={(sessionId) => {
+            onKillSession(sessionId)
+            setCtxMenu(null)
+          }}
+          onDeleteWorkspace={(workspaceId) => {
+            onDeleteWorkspace(workspaceId)
+            setCtxMenu(null)
+          }}
+          onNewSessionInWorkspace={() => {
+            if (ctxWorkspace) {
+              onNewSession(ctxWorkspace.id)
+            }
+            setCtxMenu(null)
+          }}
         />
       )}
     </div>

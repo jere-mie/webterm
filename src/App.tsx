@@ -1,5 +1,5 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { PanelLeft, Plus, Search, X } from 'lucide-react'
+import { PanelLeft, Search, Settings, X } from 'lucide-react'
 import {
   DndContext,
   DragOverlay,
@@ -20,21 +20,33 @@ import { io, type Socket } from 'socket.io-client'
 
 import type { SessionMetaPayload, SessionRemovedPayload, SessionSnapshot, SocketAck, SpawnSessionPayload } from '../shared/protocol'
 import { CommandPalette, type PaletteAction } from './components/command-palette'
+import { SettingsModal, type AppSettings } from './components/settings-modal'
 import {
   TerminalSurface,
   type TerminalSurfaceCommand,
 } from './components/terminal-surface'
 import { WorkspaceSidebar } from './components/workspace-sidebar'
 import { useAppState } from './hooks/useAppState'
-import { cn } from './lib/utils'
+import { cn, formatShortcut } from './lib/utils'
 import './App.css'
 
-const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
-
 const SIDEBAR_WIDTH_KEY = 'webterm.sidebar-width'
+const SETTINGS_KEY = 'webterm.settings'
 const SIDEBAR_MIN_WIDTH = 160
 const SIDEBAR_MAX_WIDTH = 480
 const SIDEBAR_DEFAULT_WIDTH = 248
+const MOBILE_SIDEBAR_MEDIA_QUERY = '(max-width: 767px)'
+
+interface SpawnSessionOptions {
+  workspaceId?: string
+  focus?: boolean
+}
+
+interface PendingSpawn {
+  sessionId: string
+  workspaceId?: string
+  focus?: boolean
+}
 
 function getInitialSidebarWidth(): number {
   try {
@@ -46,16 +58,39 @@ function getInitialSidebarWidth(): number {
   return SIDEBAR_DEFAULT_WIDTH
 }
 
+const VALID_SHELLS = new Set(['powershell', 'bash', 'zsh', 'cmd', 'git-bash'])
+
+function loadSettings(): AppSettings {
+  try {
+    const stored = window.localStorage.getItem(SETTINGS_KEY)
+    if (stored) {
+      const parsed = JSON.parse(stored) as Record<string, unknown>
+      if (typeof parsed === 'object' && parsed !== null) {
+        const fontSize = Number(parsed.fontSize)
+        return {
+          cwd: typeof parsed.cwd === 'string' ? parsed.cwd : undefined,
+          shell: VALID_SHELLS.has(String(parsed.shell)) ? parsed.shell as AppSettings['shell'] : undefined,
+          customShellPath: typeof parsed.customShellPath === 'string' ? parsed.customShellPath : undefined,
+          copyOnSelect: parsed.copyOnSelect === true ? true : undefined,
+          fontSize: Number.isFinite(fontSize) && fontSize >= 10 && fontSize <= 28 ? fontSize : undefined,
+        }
+      }
+    }
+  } catch { /* ok */ }
+  return {}
+}
+
 // ─── Sortable tab (for tab strip DnD) ────────────────────────────────────────
 
 interface SortableTabProps {
   session: SessionSnapshot
   isActive: boolean
+  isBelling: boolean
   onSelect: () => void
   onClose: () => void
 }
 
-function SortableTab({ session, isActive, onSelect, onClose }: SortableTabProps) {
+function SortableTab({ session, isActive, isBelling, onSelect, onClose }: SortableTabProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: session.id,
   })
@@ -69,7 +104,7 @@ function SortableTab({ session, isActive, onSelect, onClose }: SortableTabProps)
       ref={setNodeRef}
       style={style}
       aria-selected={isActive}
-      className={cn('workspace-tab', isActive && 'is-active', isDragging && 'is-dragging')}
+      className={cn('workspace-tab', isActive && 'is-active', isDragging && 'is-dragging', isBelling && 'is-belling')}
       role="tab"
       {...attributes}
       {...listeners}
@@ -100,6 +135,7 @@ function SortableTab({ session, isActive, onSelect, onClose }: SortableTabProps)
 function App() {
   const socketRef = useRef<Socket | null>(null)
   const spawnLockRef = useRef(false)
+  const pendingSpawnsRef = useRef<PendingSpawn[]>([])
   const [sessions, setSessions] = useState<SessionSnapshot[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -109,6 +145,12 @@ function App() {
   const [terminalCommand, setTerminalCommand] =
     useState<TerminalSurfaceCommand | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(getInitialSidebarWidth)
+  const [renamingWorkspaceId, setRenamingWorkspaceId] = useState<string | null>(null)
+  const appSettingsRef = useRef<AppSettings>(loadSettings())
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => appSettingsRef.current)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [bellSessions, setBellSessions] = useState<Set<string>>(new Set())
+  const bellTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
 
@@ -122,6 +164,7 @@ function App() {
     renameWorkspace,
     setActiveWorkspace,
     addSessionToWorkspace,
+    removeSession,
     closeTab,
     setActiveSession,
     moveSessionToWorkspace,
@@ -153,12 +196,35 @@ function App() {
   )
 
   const spawnSession = useCallback(
-    async (payload: SpawnSessionPayload = {}) => {
+    async (
+      payload: SpawnSessionPayload = {},
+      options?: SpawnSessionOptions,
+    ) => {
       try {
-        const nextSession = await emitWithAck<SessionSnapshot>('spawn', payload)
+        const settings = appSettingsRef.current
+        const mergedPayload: SpawnSessionPayload = {
+          cwd: settings.cwd || undefined,
+          shell: settings.shell || undefined,
+          customShellPath: settings.customShellPath || undefined,
+          ...payload,
+        }
+        const nextSession = await emitWithAck<SessionSnapshot>('spawn', mergedPayload)
 
-        addSessionToWorkspace(nextSession.id)
-        setActiveSession(nextSession.id)
+        pendingSpawnsRef.current.push({
+          sessionId: nextSession.id,
+          workspaceId: options?.workspaceId,
+          focus: options?.focus,
+        })
+        startTransition(() => {
+          setSessions((currentSessions) => {
+            if (currentSessions.some((session) => session.id === nextSession.id)) {
+              return currentSessions
+            }
+
+            return [...currentSessions, nextSession]
+          })
+        })
+
         setErrorMessage(null)
         setBootState('ready')
 
@@ -171,16 +237,34 @@ function App() {
         throw error
       }
     },
-    [emitWithAck, addSessionToWorkspace, setActiveSession],
-  )
-
-  const restartSession = useCallback(
-    async (sessionId: string) => {
-      await emitWithAck<SessionSnapshot>('restart-session', { sessionId })
-      setErrorMessage(null)
-    },
     [emitWithAck],
   )
+
+  useEffect(() => {
+    if (pendingSpawnsRef.current.length === 0) {
+      return
+    }
+
+    const liveSessionIds = new Set(sessions.map((session) => session.id))
+    const remainingSpawns: PendingSpawn[] = []
+
+    for (const pendingSpawn of pendingSpawnsRef.current) {
+      if (!liveSessionIds.has(pendingSpawn.sessionId)) {
+        remainingSpawns.push(pendingSpawn)
+        continue
+      }
+
+      addSessionToWorkspace(pendingSpawn.sessionId, pendingSpawn.workspaceId)
+
+      if (pendingSpawn.focus !== false) {
+        setActiveSession(pendingSpawn.sessionId)
+      } else if (pendingSpawn.workspaceId) {
+        setActiveWorkspace(pendingSpawn.workspaceId)
+      }
+    }
+
+    pendingSpawnsRef.current = remainingSpawns
+  }, [sessions, addSessionToWorkspace, setActiveSession, setActiveWorkspace])
 
   const closeSession = useCallback(
     async (sessionId: string) => {
@@ -197,6 +281,28 @@ function App() {
     [emitWithAck],
   )
 
+  const handleSaveSettings = useCallback((nextSettings: AppSettings) => {
+    appSettingsRef.current = nextSettings
+    setAppSettings(nextSettings)
+    try {
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(nextSettings))
+    } catch { /* ok */ }
+  }, [])
+
+  const createWorkspaceWithSession = useCallback(async () => {
+    const workspaceId = createWorkspace()
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY).matches
+    ) {
+      setSidebarOpen(true)
+    }
+    setActiveWorkspace(workspaceId)
+    setRenamingWorkspaceId(workspaceId)
+    await spawnSession({}, { workspaceId })
+    return workspaceId
+  }, [createWorkspace, setActiveWorkspace, spawnSession])
+
   const handlePaletteAction = useCallback(
     async (action: PaletteAction) => {
       const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null
@@ -211,9 +317,6 @@ function App() {
             shell: activeSession.shell,
             title: `${activeSession.title} copy`,
           })
-          return
-        case 'restart-session':
-          if (activeSessionId) await restartSession(activeSessionId)
           return
         case 'clear-terminal':
           if (activeSessionId) issueTerminalCommand(activeSessionId, 'clear')
@@ -232,7 +335,7 @@ function App() {
           return
       }
     },
-    [activeSessionId, sessions, closeSession, closeTab, restartSession, spawnSession],
+    [activeSessionId, sessions, closeSession, closeTab, spawnSession],
   )
 
   useEffect(() => {
@@ -275,12 +378,13 @@ function App() {
       })
     }
 
-    function removeSession(sessionId: string) {
+    function handleSessionRemoved(sessionId: string) {
       startTransition(() => {
         setSessions((currentSessions) =>
           currentSessions.filter((session) => session.id !== sessionId),
         )
       })
+      removeSession(sessionId)
     }
 
     socket.on('connect', () => {
@@ -298,71 +402,150 @@ function App() {
       syncSessionList(nextSessions)
     })
     socket.on('session-meta', ({ session }: SessionMetaPayload) => upsertSession(session))
-    socket.on('session-removed', ({ sessionId }: SessionRemovedPayload) => removeSession(sessionId))
+    socket.on('session-removed', ({ sessionId }: SessionRemovedPayload) =>
+      handleSessionRemoved(sessionId),
+    )
+
+    function handleBell(event: Event) {
+      const sessionId = (event as CustomEvent<string>).detail
+      if (!sessionId) return
+      const timers = bellTimersRef.current
+      const prev = timers.get(sessionId)
+      if (prev !== undefined) clearTimeout(prev)
+      setBellSessions((s) => { const next = new Set(s); next.add(sessionId); return next })
+      timers.set(sessionId, setTimeout(() => {
+        setBellSessions((s) => { const next = new Set(s); next.delete(sessionId); return next })
+        timers.delete(sessionId)
+      }, 800))
+    }
+
+    window.addEventListener('webterm:bell', handleBell)
 
     return () => {
       socket.close()
       socketRef.current = null
+      window.removeEventListener('webterm:bell', handleBell)
     }
-  }, [spawnSession])
+  }, [removeSession, spawnSession])
 
-  // Keyboard shortcuts including Alt+Up/Down (workspaces) and Alt+Left/Right (tabs)
   useEffect(() => {
     function getAllWorkspaceIds(): string[] {
       return workspaces.map((w) => w.id)
     }
 
     function handleKeyboardShortcuts(event: KeyboardEvent) {
-      // Don't fire global shortcuts when typing in editable fields
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
 
-      const commandKey = event.ctrlKey || event.metaKey
+      const hasNonAltModifier = event.ctrlKey || event.metaKey
 
-      // Ctrl/Cmd+K → command palette
-      if (commandKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+      if (!event.altKey || hasNonAltModifier) {
+        return
+      }
+
+      if (!event.shiftKey && event.code === 'KeyK') {
         event.preventDefault()
         setPaletteOpen(true)
+        return
       }
 
-      // Alt+N → new session (event.code is layout-independent, avoids macOS dead key issues)
-      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyN') {
+      if (!event.shiftKey && event.code === 'KeyN') {
         event.preventDefault()
         void spawnSession()
+        return
       }
 
-      // Alt+M → new workspace
-      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyM') {
+      if (!event.shiftKey && event.code === 'KeyM') {
         event.preventDefault()
-        const id = createWorkspace()
-        setActiveWorkspace(id)
+        void createWorkspaceWithSession()
+        return
       }
 
-      // Alt+W → close active tab
-      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyW' && activeSessionId) {
+      if (event.shiftKey && event.code === 'KeyW' && activeSessionId) {
+        event.preventDefault()
+        void closeSession(activeSessionId)
+        return
+      }
+
+      if (!event.shiftKey && event.code === 'KeyW' && activeSessionId) {
         event.preventDefault()
         closeTab(activeSessionId)
+        return
       }
 
-      if (event.altKey && !commandKey) {
-        if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-          event.preventDefault()
-          const allWsIds = getAllWorkspaceIds()
-          if (allWsIds.length === 0) return
-          const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
-          const delta = event.key === 'ArrowDown' ? 1 : -1
-          setActiveWorkspace(allWsIds[(currentIdx + delta + allWsIds.length) % allWsIds.length])
-          return
+      // Alt+Shift+Arrow: reorder tabs (Left/Right) or workspaces (Up/Down)
+      if (event.shiftKey && event.key === 'ArrowLeft') {
+        event.preventDefault()
+        const tabIds = activeWorkspace?.openSessionIds ?? []
+        if (activeSessionId && tabIds.length > 1) {
+          const currentIdx = tabIds.indexOf(activeSessionId)
+          if (currentIdx !== -1) {
+            const newIdx = (currentIdx - 1 + tabIds.length) % tabIds.length
+            if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, currentIdx, newIdx))
+          }
         }
+        return
+      }
 
-        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-          event.preventDefault()
-          const tabIds = activeWorkspace?.openSessionIds ?? []
-          if (tabIds.length === 0) return
-          const currentIdx = tabIds.indexOf(activeSessionId ?? '')
-          const delta = event.key === 'ArrowRight' ? 1 : -1
-          setActiveSession(tabIds[(currentIdx + delta + tabIds.length) % tabIds.length])
-          return
+      if (event.shiftKey && event.key === 'ArrowRight') {
+        event.preventDefault()
+        const tabIds = activeWorkspace?.openSessionIds ?? []
+        if (activeSessionId && tabIds.length > 1) {
+          const currentIdx = tabIds.indexOf(activeSessionId)
+          if (currentIdx !== -1) {
+            const newIdx = (currentIdx + 1) % tabIds.length
+            if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, currentIdx, newIdx))
+          }
         }
+        return
+      }
+
+      if (event.shiftKey && event.key === 'ArrowUp') {
+        event.preventDefault()
+        const allWsIds = getAllWorkspaceIds()
+        if (allWsIds.length > 1) {
+          const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
+          if (currentIdx !== -1) {
+            const newIdx = (currentIdx - 1 + allWsIds.length) % allWsIds.length
+            reorderWorkspaces(arrayMove(allWsIds, currentIdx, newIdx))
+          }
+        }
+        return
+      }
+
+      if (event.shiftKey && event.key === 'ArrowDown') {
+        event.preventDefault()
+        const allWsIds = getAllWorkspaceIds()
+        if (allWsIds.length > 1) {
+          const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
+          if (currentIdx !== -1) {
+            const newIdx = (currentIdx + 1) % allWsIds.length
+            reorderWorkspaces(arrayMove(allWsIds, currentIdx, newIdx))
+          }
+        }
+        return
+      }
+
+      if (event.shiftKey) {
+        return
+      }
+
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        event.preventDefault()
+        const allWsIds = getAllWorkspaceIds()
+        if (allWsIds.length === 0) return
+        const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
+        const delta = event.key === 'ArrowDown' ? 1 : -1
+        setActiveWorkspace(allWsIds[(currentIdx + delta + allWsIds.length) % allWsIds.length])
+        return
+      }
+
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+        event.preventDefault()
+        const tabIds = activeWorkspace?.openSessionIds ?? []
+        if (tabIds.length === 0) return
+        const currentIdx = tabIds.indexOf(activeSessionId ?? '')
+        const delta = event.key === 'ArrowRight' ? 1 : -1
+        setActiveSession(tabIds[(currentIdx + delta + tabIds.length) % tabIds.length])
       }
     }
 
@@ -377,11 +560,14 @@ function App() {
         case 'new-session':
           void spawnSession()
           break
-        case 'new-workspace': {
-          const id = createWorkspace()
-          setActiveWorkspace(id)
+        case 'new-workspace':
+          void createWorkspaceWithSession()
           break
-        }
+        case 'kill-session':
+          if (activeSessionId) {
+            void closeSession(activeSessionId)
+          }
+          break
         case 'hide-from-workspace':
           if (activeSessionId) closeTab(activeSessionId)
           break
@@ -411,6 +597,43 @@ function App() {
           setActiveSession(tabIds[(idx + 1) % tabIds.length])
           break
         }
+        case 'alt-shift-prev-tab': {
+          const tabIds = activeWorkspace?.openSessionIds ?? []
+          if (!activeSessionId || tabIds.length <= 1) break
+          const idx = tabIds.indexOf(activeSessionId)
+          if (idx === -1) break
+          const newIdx = (idx - 1 + tabIds.length) % tabIds.length
+          if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, idx, newIdx))
+          break
+        }
+        case 'alt-shift-next-tab': {
+          const tabIds = activeWorkspace?.openSessionIds ?? []
+          if (!activeSessionId || tabIds.length <= 1) break
+          const idx = tabIds.indexOf(activeSessionId)
+          if (idx === -1) break
+          const newIdx = (idx + 1) % tabIds.length
+          if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, idx, newIdx))
+          break
+        }
+        case 'alt-shift-prev-workspace': {
+          if (allWsIds.length <= 1) break
+          const idx = allWsIds.indexOf(activeWorkspaceId ?? '')
+          if (idx === -1) break
+          const newIdx = (idx - 1 + allWsIds.length) % allWsIds.length
+          reorderWorkspaces(arrayMove(allWsIds, idx, newIdx))
+          break
+        }
+        case 'alt-shift-next-workspace': {
+          if (allWsIds.length <= 1) break
+          const idx = allWsIds.indexOf(activeWorkspaceId ?? '')
+          if (idx === -1) break
+          const newIdx = (idx + 1) % allWsIds.length
+          reorderWorkspaces(arrayMove(allWsIds, idx, newIdx))
+          break
+        }
+        case 'search':
+          if (activeSessionId) issueTerminalCommand(activeSessionId, 'search')
+          break
       }
     }
 
@@ -426,8 +649,11 @@ function App() {
     activeWorkspaceId,
     activeWorkspace,
     workspaces,
+    closeSession,
     closeTab,
-    createWorkspace,
+    createWorkspaceWithSession,
+    reorderOpenTabs,
+    reorderWorkspaces,
     setActiveSession,
     setActiveWorkspace,
     spawnSession,
@@ -524,12 +750,13 @@ function App() {
           sessions={sessions}
           activeWorkspaceId={activeWorkspaceId}
           activeSessionId={activeSessionId}
+          renamingWorkspaceId={renamingWorkspaceId}
+          onRenamingWorkspaceChange={setRenamingWorkspaceId}
           onSelectWorkspace={setActiveWorkspace}
           onDeleteWorkspace={deleteWorkspace}
           onRenameWorkspace={renameWorkspace}
           onCreateWorkspace={() => {
-            const id = createWorkspace()
-            setActiveWorkspace(id)
+            void createWorkspaceWithSession()
           }}
           onSelectSession={(id) => {
             setActiveSession(id)
@@ -538,7 +765,9 @@ function App() {
           onKillSession={(id) => void closeSession(id)}
           onCloseTab={closeTab}
           onRenameSession={(id, title) => void renameSession(id, title)}
-          onNewSession={() => void spawnSession()}
+          onNewSession={(workspaceId) =>
+            void spawnSession({}, workspaceId ? { workspaceId } : undefined)
+          }
           onReorderWorkspaces={reorderWorkspaces}
           onReorderSessionsInWorkspace={reorderSessionsInWorkspace}
           onMoveSessionToWorkspace={moveSessionToWorkspace}
@@ -578,6 +807,7 @@ function App() {
                     key={session.id}
                     session={session}
                     isActive={session.id === activeSessionId}
+                    isBelling={bellSessions.has(session.id)}
                     onSelect={() => setActiveSession(session.id)}
                     onClose={() => closeTab(session.id)}
                   />
@@ -597,14 +827,15 @@ function App() {
             >
               <Search className="h-3.5 w-3.5" />
               <span>Command</span>
-              <span className="shortcut-chip">{isMac ? '⌘K' : 'Ctrl K'}</span>
+              <span className="shortcut-chip">{formatShortcut(['Alt', 'K'])}</span>
             </button>
             <button
-              className="action-btn"
-              onClick={() => void spawnSession()}
+              aria-label="Settings"
+              className="action-btn action-btn-icon"
+              onClick={() => setSettingsOpen(true)}
               type="button"
             >
-              <Plus className="h-3.5 w-3.5" />
+              <Settings className="h-3.5 w-3.5" />
             </button>
           </div>
         </div>
@@ -614,10 +845,12 @@ function App() {
           {sessions.length > 0 ? (
             sessions.map((session) => (
               <TerminalSurface
+                autoFocusOnActivate={renamingWorkspaceId === null}
                 command={terminalCommand}
                 isActive={session.id === activeSessionId}
                 key={session.id}
                 session={session}
+                settings={appSettings}
                 socket={socketRef.current as Socket}
               />
             ))
@@ -651,6 +884,13 @@ function App() {
         }}
         open={paletteOpen}
         sessions={sessions}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        settings={appSettings}
+        onSave={handleSaveSettings}
       />
     </div>
   )

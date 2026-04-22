@@ -18,10 +18,11 @@ import type {
   SpawnSessionPayload,
 } from '../shared/protocol.js'
 import { SessionManager } from './session-manager.js'
+import { listAvailableShells } from './shell.js'
 
 const projectRoot = process.cwd()
 const host = '127.0.0.1'
-const defaultPort = parseInt(process.env.PORT ?? '3001', 10)
+const defaultPort = resolvePort(process.env.WEBTERM_PORT ?? process.env.PORT ?? '3001')
 
 const app = express()
 const httpServer = createHttpServer(app)
@@ -45,6 +46,10 @@ const healthPayload: HealthPayload = {
 
 app.get('/api/health', (_request, response) => {
   response.json(healthPayload)
+})
+
+app.get('/api/shells', (_request, response) => {
+  response.json({ shells: listAvailableShells() })
 })
 
 if (process.env.NODE_ENV === 'production') {
@@ -219,4 +224,14 @@ function canBind(portToTest: number, bindHost: string) {
 
     probeServer.listen(portToTest, bindHost)
   })
+}
+
+function resolvePort(rawPort: string) {
+  const parsedPort = Number(rawPort)
+
+  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    throw new Error(`Invalid port value: ${rawPort}`)
+  }
+
+  return parsedPort
 }

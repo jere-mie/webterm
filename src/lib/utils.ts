@@ -9,6 +9,8 @@ const clockFormatter = new Intl.DateTimeFormat('en-US', {
   hour: '2-digit',
   minute: '2-digit',
 })
+const isMacPlatform =
+  typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -43,4 +45,12 @@ export function formatClock(timestamp: number) {
 
 export function compactId(id: string) {
   return id.slice(0, 8).toUpperCase()
+}
+
+export function formatShortcut(parts: string[]) {
+  return parts
+    .map((part) =>
+      part.toLowerCase() === 'alt' && isMacPlatform ? 'Option' : part,
+    )
+    .join(' ')
 }

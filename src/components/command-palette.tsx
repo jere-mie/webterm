@@ -4,7 +4,6 @@ import {
   Eraser,
   PanelLeft,
   Plus,
-  RefreshCw,
   Search,
   X,
 } from 'lucide-react'
@@ -21,11 +20,11 @@ import {
   CommandList,
   CommandSeparator,
 } from './ui/command'
+import { formatShortcut } from '../lib/utils'
 
 export type PaletteAction =
   | 'new-session'
   | 'duplicate-session'
-  | 'restart-session'
   | 'clear-terminal'
   | 'hide-from-workspace'
   | 'kill-session'
@@ -59,7 +58,11 @@ export function CommandPalette({
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange}>
       <Command>
-        <CommandInput placeholder="Jump to a tab, clear the deck, or relaunch a shell..." />
+        <CommandInput
+          id="command-palette-input"
+          name="command-palette"
+          placeholder="Jump to a tab, run an action, or spawn a new shell…"
+        />
         <CommandList>
           <CommandEmpty>No matching terminal operations.</CommandEmpty>
           <CommandGroup heading="Actions">
@@ -71,7 +74,7 @@ export function CommandPalette({
                   Launch a fresh localhost shell session.
                 </span>
               </div>
-              <span className="shortcut-chip">Alt N</span>
+              <span className="shortcut-chip">{formatShortcut(['Alt', 'N'])}</span>
             </CommandItem>
             <CommandItem
               disabled={!activeSession}
@@ -82,18 +85,6 @@ export function CommandPalette({
                 <span className="font-medium text-[var(--text-strong)]">Duplicate active tab</span>
                 <span className="text-xs text-[var(--muted-strong)]">
                   Clone the current shell in the same directory.
-                </span>
-              </div>
-            </CommandItem>
-            <CommandItem
-              disabled={!activeSession}
-              onSelect={() => runAction('restart-session')}
-            >
-              <RefreshCw data-slot="command-icon" className="h-4 w-4" />
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                <span className="font-medium text-[var(--text-strong)]">Restart active shell</span>
-                <span className="text-xs text-[var(--muted-strong)]">
-                  Respawn the PTY while keeping the tab identity.
                 </span>
               </div>
             </CommandItem>
@@ -132,7 +123,7 @@ export function CommandPalette({
                   Remove from current workspace; PTY keeps running in the background.
                 </span>
               </div>
-              <span className="shortcut-chip">Ctrl W</span>
+              <span className="shortcut-chip">{formatShortcut(['Alt', 'W'])}</span>
             </CommandItem>
             <CommandItem disabled={!activeSession} onSelect={() => runAction('kill-session')}>
               <X data-slot="command-icon" className="h-4 w-4" />
@@ -142,6 +133,7 @@ export function CommandPalette({
                   Terminate the PTY process and remove the session from memory.
                 </span>
               </div>
+              <span className="shortcut-chip">{formatShortcut(['Alt', 'Shift', 'W'])}</span>
             </CommandItem>
           </CommandGroup>
           <CommandSeparator />

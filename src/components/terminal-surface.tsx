@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal } from '@xterm/xterm'
+import { ChevronDown, ChevronUp, X } from 'lucide-react'
 import type { Socket } from 'socket.io-client'
 
 import type {
@@ -11,12 +14,13 @@ import type {
   SessionSnapshot,
   SocketAck,
 } from '../../shared/protocol'
+import type { AppSettings } from './settings-modal'
 import { cn } from '../lib/utils'
 import '@xterm/xterm/css/xterm.css'
 
 export interface TerminalSurfaceCommand {
   sessionId: string
-  kind: 'clear' | 'focus' | 'fit'
+  kind: 'clear' | 'focus' | 'fit' | 'search'
   nonce: number
 }
 
@@ -25,12 +29,33 @@ interface TerminalSurfaceProps {
   session: SessionSnapshot
   socket: Socket
   isActive: boolean
+  autoFocusOnActivate?: boolean
+  settings?: AppSettings
 }
 
-export function TerminalSurface({ command, session, socket, isActive }: TerminalSurfaceProps) {
+export function TerminalSurface({
+  command,
+  session,
+  socket,
+  isActive,
+  autoFocusOnActivate = true,
+  settings,
+}: TerminalSurfaceProps) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
+  const webglAddonRef = useRef<WebglAddon | null>(null)
+  const searchAddonRef = useRef<SearchAddon | null>(null)
+  const settingsRef = useRef<AppSettings | undefined>(settings)
+  const searchInputRef = useRef<HTMLInputElement | null>(null)
+
+  const [showSearch, setShowSearch] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
+
+  // Keep settingsRef in sync with settings prop
+  useEffect(() => {
+    settingsRef.current = settings
+  }, [settings])
 
   const fitAndResize = useCallback(() => {
     const host = hostRef.current
@@ -93,6 +118,37 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
     )
   }, [session.id, socket])
 
+  const setWebglRendererEnabled = useCallback((enabled: boolean) => {
+    const terminal = terminalRef.current
+
+    if (!terminal) {
+      return
+    }
+
+    if (!enabled) {
+      webglAddonRef.current?.dispose()
+      webglAddonRef.current = null
+      return
+    }
+
+    if (webglAddonRef.current) {
+      return
+    }
+
+    try {
+      const addon = new WebglAddon()
+      terminal.loadAddon(addon)
+      webglAddonRef.current = addon
+      // Force full repaint so WebGL re-renders all existing cells correctly
+      // (avoids first-cell rendering artifacts in apps like vim)
+      requestAnimationFrame(() => {
+        terminal.refresh(0, terminal.rows - 1)
+      })
+    } catch {
+      // Canvas rendering is an acceptable fallback when WebGL is unavailable.
+    }
+  }, [])
+
   useEffect(() => {
     if (!hostRef.current) {
       return
@@ -100,11 +156,11 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
 
     const terminal = new Terminal({
       allowTransparency: true,
-      convertEol: true,
+      convertEol: false,
       cursorBlink: true,
       cursorInactiveStyle: 'outline',
       fontFamily: '"JetBrainsMono Nerd Font", "JetBrains Mono", "IBM Plex Mono", monospace',
-      fontSize: 14,
+      fontSize: settingsRef.current?.fontSize ?? 14,
       lineHeight: 1.0,
       scrollback: 5000,
       theme: {
@@ -132,65 +188,114 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       },
     })
     const fitAddon = new FitAddon()
+    const searchAddon = new SearchAddon()
+    const webLinksAddon = new WebLinksAddon((event, uri) => {
+      if (event.ctrlKey || event.metaKey) {
+        window.open(uri, '_blank', 'noopener,noreferrer')
+      }
+    })
 
     terminalRef.current = terminal
     fitAddonRef.current = fitAddon
+    searchAddonRef.current = searchAddon
 
     terminal.loadAddon(fitAddon)
-
-    try {
-      terminal.loadAddon(new WebglAddon())
-    } catch {
-      // Canvas rendering is an acceptable fallback when WebGL is unavailable.
-    }
+    terminal.loadAddon(searchAddon)
+    terminal.loadAddon(webLinksAddon)
 
     terminal.open(hostRef.current)
     terminal.writeln('[webterm] attaching to session...')
+
+    terminal.onBell(() => {
+      window.dispatchEvent(new CustomEvent('webterm:bell', { detail: session.id }))
+    })
+
+    terminal.onSelectionChange(() => {
+      if (!settingsRef.current?.copyOnSelect) return
+      const text = terminal.getSelection()
+      if (!text) return
+      navigator.clipboard.writeText(text).catch(() => {
+        // Fallback for older browsers
+        const el = document.createElement('textarea')
+        el.value = text
+        el.style.position = 'fixed'
+        el.style.opacity = '0'
+        document.body.appendChild(el)
+        el.select()
+        document.execCommand('copy')
+        document.body.removeChild(el)
+      })
+    })
 
     // Intercept app-level shortcuts before xterm can swallow them.
     // Returns false → xterm skips this key; the DOM event still fires on window.
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true
-      const isMod = event.ctrlKey || event.metaKey
 
-      if (isMod && event.key.toLowerCase() === 'k') {
+      // Ctrl+Shift+F → open terminal search (before altKey guard)
+      if (event.ctrlKey && event.shiftKey && event.code === 'KeyF') {
+        event.preventDefault()
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'search' }))
+        return false
+      }
+
+      const hasNonAltModifier = event.ctrlKey || event.metaKey
+
+      if (!event.altKey || hasNonAltModifier) {
+        return true
+      }
+
+      if (!event.shiftKey && event.code === 'KeyK') {
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'open-palette' }))
         return false
       }
-      if (isMod && event.key.toLowerCase() === 'w') {
+      if (event.shiftKey && event.code === 'KeyW') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'kill-session' }))
+        return false
+      }
+      if (!event.shiftKey && event.code === 'KeyW') {
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
         return false
       }
-      // Alt+N / Alt+M — use event.code to be layout-independent
-      if (event.altKey && !isMod) {
-        if (event.code === 'KeyW') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
-          return false
-        }
-        if (event.code === 'KeyM') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-workspace' }))
-          return false
-        }
-        if (event.code === 'KeyN') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
-          return false
-        }
-        if (event.key === 'ArrowUp') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-workspace' }))
-          return false
-        }
-        if (event.key === 'ArrowDown') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-next-workspace' }))
-          return false
-        }
-        if (event.key === 'ArrowLeft') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-tab' }))
-          return false
-        }
-        if (event.key === 'ArrowRight') {
-          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-next-tab' }))
-          return false
-        }
+      if (!event.shiftKey && event.code === 'KeyM') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-workspace' }))
+        return false
+      }
+      if (!event.shiftKey && event.code === 'KeyN') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
+        return false
+      }
+      if (!event.shiftKey && event.key === 'ArrowLeft') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-tab' }))
+        return false
+      }
+      if (!event.shiftKey && event.key === 'ArrowRight') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-next-tab' }))
+        return false
+      }
+      if (event.shiftKey && event.key === 'ArrowLeft') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-shift-prev-tab' }))
+        return false
+      }
+      if (event.shiftKey && event.key === 'ArrowRight') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-shift-next-tab' }))
+        return false
+      }
+      if (!event.shiftKey && event.key === 'ArrowUp') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-workspace' }))
+        return false
+      }
+      if (!event.shiftKey && event.key === 'ArrowDown') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-next-workspace' }))
+        return false
+      }
+      if (event.shiftKey && event.key === 'ArrowUp') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-shift-prev-workspace' }))
+        return false
+      }
+      if (event.shiftKey && event.key === 'ArrowDown') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-shift-next-workspace' }))
+        return false
       }
 
       return true
@@ -219,6 +324,9 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
     return () => {
       window.removeEventListener('webterm:refit', handleRefit)
       inputSubscription.dispose()
+      webglAddonRef.current?.dispose()
+      webglAddonRef.current = null
+      searchAddonRef.current = null
       terminal.dispose()
       terminalRef.current = null
       fitAddonRef.current = null
@@ -252,6 +360,16 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
   }, [replayBuffer, resetTerminal, socket, writeOutput])
 
   useEffect(() => {
+    setWebglRendererEnabled(isActive)
+
+    return () => {
+      if (isActive) {
+        setWebglRendererEnabled(false)
+      }
+    }
+  }, [isActive, setWebglRendererEnabled])
+
+  useEffect(() => {
     if (!isActive) {
       return
     }
@@ -268,13 +386,26 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
 
     requestAnimationFrame(() => {
       fitAndResize()
-      terminalRef.current?.focus()
+      if (autoFocusOnActivate) {
+        terminalRef.current?.focus()
+      }
     })
 
     return () => {
       observer.disconnect()
     }
-  }, [fitAndResize, isActive])
+  }, [autoFocusOnActivate, fitAndResize, isActive])
+
+  // Update font size dynamically when settings change
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) return
+    const size = settings?.fontSize ?? 14
+    if (terminal.options.fontSize !== size) {
+      terminal.options.fontSize = size
+      requestAnimationFrame(() => fitAndResize())
+    }
+  }, [settings?.fontSize, fitAndResize])
 
   useEffect(() => {
     if (!command || command.sessionId !== session.id) {
@@ -292,8 +423,26 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       return
     }
 
+    if (command.kind === 'search') {
+      startTransition(() => setShowSearch(true))
+      return
+    }
+
     fitAndResize()
   }, [command, fitAndResize, session.id])
+
+  useEffect(() => {
+    if (showSearch) {
+      requestAnimationFrame(() => searchInputRef.current?.focus())
+    }
+  }, [showSearch])
+
+  function closeSearch() {
+    setShowSearch(false)
+    setSearchQuery('')
+    searchAddonRef.current?.clearDecorations()
+    terminalRef.current?.focus()
+  }
 
   return (
     <div
@@ -301,6 +450,57 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       className={cn('terminal-stage', isActive ? 'is-active' : 'is-hidden')}
     >
       <div className="terminal-canvas" ref={hostRef} />
+      {showSearch && isActive && (
+        <div className="terminal-search-bar">
+          <input
+            ref={searchInputRef}
+            className="terminal-search-input"
+            placeholder="Find…"
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value)
+              searchAddonRef.current?.findNext(e.target.value, { incremental: true })
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') { e.stopPropagation(); closeSearch() }
+              if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                  searchAddonRef.current?.findPrevious(searchQuery)
+                } else {
+                  searchAddonRef.current?.findNext(searchQuery)
+                }
+              }
+            }}
+          />
+          <button
+            aria-label="Previous match"
+            className="terminal-search-btn"
+            onClick={() => searchAddonRef.current?.findPrevious(searchQuery)}
+            title="Previous match (Shift+Enter)"
+            type="button"
+          >
+            <ChevronUp className="h-3.5 w-3.5" />
+          </button>
+          <button
+            aria-label="Next match"
+            className="terminal-search-btn"
+            onClick={() => searchAddonRef.current?.findNext(searchQuery)}
+            title="Next match (Enter)"
+            type="button"
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+          </button>
+          <button
+            aria-label="Close search"
+            className="terminal-search-btn terminal-search-close"
+            onClick={closeSearch}
+            type="button"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
     </div>
   )
 }

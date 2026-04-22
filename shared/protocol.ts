@@ -1,4 +1,13 @@
-export type ShellKind = 'powershell' | 'bash' | 'zsh'
+export type ShellKind = 'powershell' | 'bash' | 'zsh' | 'cmd' | 'git-bash'
+
+export interface ShellInfo {
+  kind: ShellKind
+  label: string
+}
+
+export interface ShellsPayload {
+  shells: ShellInfo[]
+}
 
 export type SessionState = 'live' | 'detached' | 'exited'
 
@@ -21,6 +30,7 @@ export interface SessionSnapshot {
 
 export interface SpawnSessionPayload {
   shell?: ShellKind
+  customShellPath?: string
   cwd?: string
   title?: string
 }

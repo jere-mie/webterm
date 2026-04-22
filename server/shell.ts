@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import path from 'node:path'
 
-import type { ShellKind } from '../shared/protocol.js'
+import type { ShellInfo, ShellKind } from '../shared/protocol.js'
 
 const CWD_MARKER_PREFIX = '\u001b]633;CurrentDir='
 const CWD_MARKER_SUFFIX = '\u0007'
@@ -10,7 +11,10 @@ const CWD_MARKER_PATTERN = new RegExp(
   'g',
 )
 
-const OSC_TITLE_PATTERN = /\u001b\](?:0|1|2);([^\u0007\u001b]*)(?:\u0007|\u001b\\)/g
+const OSC_TITLE_PATTERN = new RegExp(
+  String.raw`\u001b\](?:0|1|2);([^\u0007\u001b]*)(?:\u0007|\u001b\\)`,
+  'g',
+)
 
 export interface ShellProfile {
   kind: ShellKind
@@ -99,8 +103,39 @@ export function parseShellMarkers(
 }
 
 function resolveWindowsShell(requestedKind?: ShellKind): ShellProfile {
-  if (requestedKind && requestedKind !== 'powershell') {
-    throw new Error(`Shell ${requestedKind} is not available on Windows.`)
+  if (requestedKind === 'cmd') {
+    return {
+      kind: 'cmd',
+      label: 'Command Prompt',
+      command: 'cmd.exe',
+      args: [],
+      initCommands: [
+        // Emit CurrentDir marker on every prompt; $E=ESC, $E\\ =ST terminator
+        'PROMPT=$E]633;CurrentDir=%CD%$E\\ $P$G',
+        'cls',
+      ],
+    }
+  }
+
+  if (requestedKind === 'git-bash') {
+    const gitBashPaths = [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+    ]
+    const command = gitBashPaths.find((p) => existsSync(p)) ?? 'bash'
+
+    return {
+      kind: 'git-bash',
+      label: 'Git Bash',
+      command,
+      args: ['--noprofile', '--norc', '-i'],
+      initCommands: [
+        'function __webterm_precmd(){ printf "\\033]633;CurrentDir=%s\\007" "$PWD"; }',
+        'PROMPT_COMMAND=__webterm_precmd',
+        'PS1="\\[\\e[38;5;214m\\]\\u@\\h\\[\\e[0m\\] \\[\\e[38;5;179m\\]\\w\\[\\e[0m\\] \\$ "',
+        'clear',
+      ],
+    }
   }
 
   const hasPwsh = commandExists('pwsh.exe')
@@ -128,6 +163,13 @@ function resolveUnixShell(requestedKind?: ShellKind): ShellProfile {
   if (requestedKind) {
     candidates.push(...preferredCandidatesForKind(requestedKind))
   } else if (envShell.includes('zsh')) {
+    candidates.push(...preferredCandidatesForKind('zsh'))
+    candidates.push(...preferredCandidatesForKind('bash'))
+  } else if (envShell.includes('bash')) {
+    candidates.push(...preferredCandidatesForKind('bash'))
+    candidates.push(...preferredCandidatesForKind('zsh'))
+  } else if (process.platform === 'darwin') {
+    // macOS default (Catalina+): prefer zsh when $SHELL is unset or unrecognised
     candidates.push(...preferredCandidatesForKind('zsh'))
     candidates.push(...preferredCandidatesForKind('bash'))
   } else {
@@ -178,23 +220,31 @@ function resolveUnixShell(requestedKind?: ShellKind): ShellProfile {
 }
 
 function preferredCandidatesForKind(kind: ShellKind) {
+  const envShell = process.env.SHELL ?? ''
+
   switch (kind) {
-    case 'bash':
-      return [
-        { kind, path: process.env.SHELL ?? '' },
-        { kind, path: '/bin/bash' },
-        { kind, path: '/usr/bin/bash' },
-        { kind, path: 'bash' },
-      ]
-    case 'zsh':
-      return [
-        { kind, path: process.env.SHELL ?? '' },
-        { kind, path: '/bin/zsh' },
-        { kind, path: '/usr/bin/zsh' },
-        { kind, path: 'zsh' },
-      ]
+    case 'bash': {
+      // Only use $SHELL if it actually points to bash, to avoid resolving bash → zsh
+      const envCandidates = envShell.includes('bash') ? [{ kind, path: envShell }] : []
+      return [...envCandidates, { kind, path: '/bin/bash' }, { kind, path: '/usr/bin/bash' }, { kind, path: 'bash' }]
+    }
+    case 'zsh': {
+      // Only use $SHELL if it actually points to zsh
+      const envCandidates = envShell.includes('zsh') ? [{ kind, path: envShell }] : []
+      return [...envCandidates, { kind, path: '/bin/zsh' }, { kind, path: '/usr/bin/zsh' }, { kind, path: 'zsh' }]
+    }
     case 'powershell':
       return [{ kind, path: 'pwsh.exe' }, { kind, path: 'powershell.exe' }]
+    case 'cmd':
+      return [{ kind, path: 'cmd.exe' }]
+    case 'git-bash': {
+      const gitBashPaths = [
+        'C:\\Program Files\\Git\\bin\\bash.exe',
+        'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+      ]
+      const found = gitBashPaths.find((p) => existsSync(p))
+      return found ? [{ kind, path: found }] : [{ kind, path: 'bash' }]
+    }
   }
 }
 
@@ -217,4 +267,102 @@ function decodeMarkerValue(value: string) {
   } catch {
     return value
   }
+}
+
+export function resolveCustomShellPath(customPath: string): ShellProfile {
+  const base = path.basename(customPath).toLowerCase().replace(/\.exe$/, '')
+
+  if (base.includes('zsh')) {
+    return {
+      kind: 'zsh',
+      label: customPath,
+      command: customPath,
+      args: ['-i'],
+      initCommands: [
+        'autoload -Uz add-zsh-hook',
+        'function __webterm_precmd() { printf "\\033]633;CurrentDir=%s\\007" "$PWD" }',
+        'add-zsh-hook precmd __webterm_precmd',
+        'PROMPT="%F{214}%n@%m%f %F{179}%~%f %# "',
+        'clear',
+      ],
+    }
+  }
+
+  if (base.includes('bash') || base === 'sh') {
+    return {
+      kind: 'bash',
+      label: customPath,
+      command: customPath,
+      args: ['--noprofile', '--norc', '-i'],
+      initCommands: [
+        'function __webterm_precmd(){ printf "\\033]633;CurrentDir=%s\\007" "$PWD"; }',
+        'PROMPT_COMMAND=__webterm_precmd',
+        'PS1="\\[\\e[38;5;214m\\]\\u@\\h\\[\\e[0m\\] \\[\\e[38;5;179m\\]\\w\\[\\e[0m\\] \\$ "',
+        'clear',
+      ],
+    }
+  }
+
+  if (base.includes('pwsh') || base.includes('powershell')) {
+    return {
+      kind: 'powershell',
+      label: customPath,
+      command: customPath,
+      args: ['-NoLogo'],
+      initCommands: [
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        'if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) { Set-PSReadLineOption -PredictionSource None }',
+        'function global:prompt { $cwd = (Get-Location).Path; Write-Host "`e]633;CurrentDir=$cwd`a" -NoNewline; return "PS $cwd> " }',
+        'Clear-Host',
+      ],
+    }
+  }
+
+  // Unknown shell — spawn with no special args or init commands
+  return {
+    kind: 'bash',
+    label: customPath,
+    command: customPath,
+    args: [],
+    initCommands: [],
+  }
+}
+
+export function listAvailableShells(): ShellInfo[] {
+  if (process.platform === 'win32') {
+    return listWindowsShells()
+  }
+
+  return listUnixShells()
+}
+
+function listWindowsShells(): ShellInfo[] {
+  const shells: ShellInfo[] = []
+
+  const hasPwsh = commandExists('pwsh.exe')
+  shells.push({ kind: 'powershell', label: hasPwsh ? 'PowerShell 7 (pwsh)' : 'Windows PowerShell' })
+  shells.push({ kind: 'cmd', label: 'Command Prompt (cmd.exe)' })
+
+  const gitBashPaths = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  ]
+  if (gitBashPaths.some((p) => existsSync(p)) || commandExists('bash')) {
+    shells.push({ kind: 'git-bash', label: 'Git Bash' })
+  }
+
+  return shells
+}
+
+function listUnixShells(): ShellInfo[] {
+  const shells: ShellInfo[] = []
+
+  if (existsSync('/bin/zsh') || existsSync('/usr/bin/zsh') || commandExists('zsh')) {
+    shells.push({ kind: 'zsh', label: 'Zsh' })
+  }
+  if (existsSync('/bin/bash') || existsSync('/usr/bin/bash') || commandExists('bash')) {
+    shells.push({ kind: 'bash', label: 'Bash' })
+  }
+
+  return shells
 }

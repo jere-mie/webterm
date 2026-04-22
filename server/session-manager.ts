@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import { accessSync, chmodSync, constants as fsConstants, existsSync, statSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import path from 'node:path'
 
 import { spawn } from 'node-pty'
 import type { IPty, IDisposable } from 'node-pty'
@@ -14,12 +17,17 @@ import type {
   SessionState,
   SpawnSessionPayload,
 } from '../shared/protocol.js'
-import { parseShellMarkers, resolveShell, type ShellProfile } from './shell.js'
+import { parseShellMarkers, resolveCustomShellPath, resolveShell, type ShellProfile } from './shell.js'
 
 const SESSION_BUFFER_LIMIT = 240_000
 const DETACH_TIMEOUT_MS = 15 * 60 * 1000
 const DEFAULT_COLS = 120
 const DEFAULT_ROWS = 34
+const SHOULD_FIX_NODE_PTY_HELPER =
+  process.platform === 'darwin' || process.platform === 'linux'
+
+const require = createRequire(import.meta.url)
+let hasCheckedNodePtySpawnHelper = false
 
 interface SessionRecord {
   id: string
@@ -45,7 +53,9 @@ interface SessionRecord {
 export class SessionManager {
   private readonly sessions = new Map<string, SessionRecord>()
 
-  constructor(private readonly io: Server) {}
+  constructor(private readonly io: Server) {
+    ensureNodePtySpawnHelperExecutable()
+  }
 
   listSessions() {
     return [...this.sessions.values()]
@@ -54,8 +64,10 @@ export class SessionManager {
   }
 
   createSession(options: SpawnSessionPayload = {}) {
-    const shell = resolveShell(options.shell)
-    const cwd = normalizeCwd(options.cwd ?? defaultWorkingDirectory())
+    const shell = options.customShellPath?.trim()
+      ? resolveCustomShellPath(options.customShellPath.trim())
+      : resolveShell(options.shell)
+    const cwd = normalizeCwd(expandUserCwd(options.cwd ?? defaultWorkingDirectory()))
     const now = Date.now()
     const id = randomUUID()
     const customTitle = !!(options.title?.trim())
@@ -403,10 +415,70 @@ function defaultWorkingDirectory() {
   return process.env.HOME ?? process.env.USERPROFILE ?? process.cwd()
 }
 
+function expandUserCwd(cwd: string): string {
+  if (cwd === '~' || cwd.startsWith('~/') || cwd.startsWith('~\\')) {
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? ''
+    if (home) return home + cwd.slice(1)
+  }
+  return cwd
+}
+
 function normalizeCwd(cwd: string) {
   return cwd.replace(/[\\/]+$/, '') || cwd
 }
 
 function roomName(sessionId: string) {
   return `session:${sessionId}`
+}
+
+function ensureNodePtySpawnHelperExecutable() {
+  if (!SHOULD_FIX_NODE_PTY_HELPER || hasCheckedNodePtySpawnHelper) {
+    return
+  }
+
+  const helperPath = resolveNodePtySpawnHelperPath()
+  hasCheckedNodePtySpawnHelper = true
+
+  if (!helperPath) {
+    console.warn('[webterm] Unable to locate node-pty spawn-helper for the Unix execute-permission check.')
+    return
+  }
+
+  try {
+    accessSync(helperPath, fsConstants.X_OK)
+  } catch {
+    const currentMode = statSync(helperPath).mode
+    const nextMode = currentMode | 0o111
+
+    if (nextMode !== currentMode) {
+      chmodSync(helperPath, nextMode)
+    }
+
+    accessSync(helperPath, fsConstants.X_OK)
+    console.info(`[webterm] Restored execute permissions on node-pty spawn-helper: ${helperPath}`)
+  }
+}
+
+function resolveNodePtySpawnHelperPath() {
+  const unixTerminalPath = require.resolve('node-pty/lib/unixTerminal.js')
+  const packageRoot = path.resolve(path.dirname(unixTerminalPath), '..')
+  const platformPrebuildDir = path.join(
+    packageRoot,
+    'prebuilds',
+    `${process.platform}-${process.arch}`,
+  )
+
+  const candidatePaths = [
+    path.join(packageRoot, 'build', 'Release', 'spawn-helper'),
+    path.join(packageRoot, 'build', 'Debug', 'spawn-helper'),
+    path.join(platformPrebuildDir, 'spawn-helper'),
+  ].map(unpackAsarPath)
+
+  return candidatePaths.find((candidatePath) => existsSync(candidatePath)) ?? null
+}
+
+function unpackAsarPath(candidatePath: string) {
+  return candidatePath
+    .replace('app.asar', 'app.asar.unpacked')
+    .replace('node_modules.asar', 'node_modules.asar.unpacked')
 }
