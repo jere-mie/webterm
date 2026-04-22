@@ -80,6 +80,11 @@ export interface SessionExitPayload {
   signal: number | null
 }
 
+export interface RenameSessionPayload {
+  sessionId: string
+  title: string
+}
+
 export interface HealthPayload {
   ok: true
   host: string

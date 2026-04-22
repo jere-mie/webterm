@@ -10,6 +10,8 @@ const CWD_MARKER_PATTERN = new RegExp(
   'g',
 )
 
+const OSC_TITLE_PATTERN = /\u001b\](?:0|1|2);([^\u0007\u001b]*)(?:\u0007|\u001b\\)/g
+
 export interface ShellProfile {
   kind: ShellKind
   label: string
@@ -21,6 +23,7 @@ export interface ShellProfile {
 export interface MarkerParseResult {
   cleanChunk: string
   cwd: string | null
+  title: string | null
   pendingChunk: string
 }
 
@@ -37,48 +40,61 @@ export function parseShellMarkers(
   pendingChunk: string,
 ): MarkerParseResult {
   const compositeChunk = `${pendingChunk}${chunk}`
-  let cleanChunk = ''
+  let midChunk = ''
   let cwd: string | null = null
   let lastIndex = 0
 
+  // Pass 1: strip and extract CurrentDir markers
   for (const match of compositeChunk.matchAll(CWD_MARKER_PATTERN)) {
     if (match.index === undefined) {
       continue
     }
 
-    cleanChunk += compositeChunk.slice(lastIndex, match.index)
+    midChunk += compositeChunk.slice(lastIndex, match.index)
     cwd = decodeMarkerValue(match[1])
     lastIndex = match.index + match[0].length
   }
 
-  cleanChunk += compositeChunk.slice(lastIndex)
+  midChunk += compositeChunk.slice(lastIndex)
 
-  const unfinishedMarkerIndex = cleanChunk.lastIndexOf(CWD_MARKER_PREFIX)
+  // Check for an unfinished CWD marker that may complete in the next chunk
+  const unfinishedMarkerIndex = midChunk.lastIndexOf(CWD_MARKER_PREFIX)
+  let trimmedMid = midChunk
+  let newPendingChunk = ''
 
-  if (unfinishedMarkerIndex === -1) {
-    return {
-      cleanChunk,
-      cwd,
-      pendingChunk: '',
+  if (unfinishedMarkerIndex !== -1) {
+    const unfinishedMarker = midChunk.slice(unfinishedMarkerIndex)
+    const hasTerminator = unfinishedMarker.includes(CWD_MARKER_SUFFIX)
+    const hasEscTerminator = unfinishedMarker.includes('\u001b\\')
+
+    if (!hasTerminator && !hasEscTerminator) {
+      trimmedMid = midChunk.slice(0, unfinishedMarkerIndex)
+      newPendingChunk = unfinishedMarker
     }
   }
 
-  const unfinishedMarker = cleanChunk.slice(unfinishedMarkerIndex)
-  const hasTerminator = unfinishedMarker.includes(CWD_MARKER_SUFFIX)
-  const hasEscTerminator = unfinishedMarker.includes('\u001b\\')
+  // Pass 2: strip and extract OSC 0/1/2 title sequences
+  let cleanChunk = ''
+  let title: string | null = null
+  let titleLastIndex = 0
 
-  if (hasTerminator || hasEscTerminator) {
-    return {
-      cleanChunk,
-      cwd,
-      pendingChunk: '',
+  for (const match of trimmedMid.matchAll(OSC_TITLE_PATTERN)) {
+    if (match.index === undefined) {
+      continue
     }
+
+    cleanChunk += trimmedMid.slice(titleLastIndex, match.index)
+    title = match[1]
+    titleLastIndex = match.index + match[0].length
   }
+
+  cleanChunk += trimmedMid.slice(titleLastIndex)
 
   return {
-    cleanChunk: cleanChunk.slice(0, unfinishedMarkerIndex),
+    cleanChunk,
     cwd,
-    pendingChunk: unfinishedMarker,
+    title,
+    pendingChunk: newPendingChunk,
   }
 }
 
@@ -100,7 +116,6 @@ function resolveWindowsShell(requestedKind?: ShellKind): ShellProfile {
       "$ErrorActionPreference = 'SilentlyContinue'",
       'if (Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue) { Set-PSReadLineOption -PredictionSource None }',
       'function global:prompt { $cwd = (Get-Location).Path; Write-Host "`e]633;CurrentDir=$cwd`a" -NoNewline; return "PS $cwd> " }',
-      '$host.UI.RawUI.WindowTitle = "WebTerm"',
       'Clear-Host',
     ],
   }

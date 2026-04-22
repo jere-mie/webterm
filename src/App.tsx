@@ -190,6 +190,13 @@ function App() {
     [emitWithAck],
   )
 
+  const renameSession = useCallback(
+    async (sessionId: string, title: string) => {
+      await emitWithAck('rename-session', { sessionId, title })
+    },
+    [emitWithAck],
+  )
+
   const handlePaletteAction = useCallback(
     async (action: PaletteAction) => {
       const activeSession = sessions.find((s) => s.id === activeSessionId) ?? null
@@ -306,6 +313,9 @@ function App() {
     }
 
     function handleKeyboardShortcuts(event: KeyboardEvent) {
+      // Don't fire global shortcuts when typing in editable fields
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
+
       const commandKey = event.ctrlKey || event.metaKey
 
       // Ctrl/Cmd+K → command palette
@@ -314,14 +324,14 @@ function App() {
         setPaletteOpen(true)
       }
 
-      // Ctrl/Cmd+Shift+N → new session
-      if (commandKey && event.shiftKey && event.key.toLowerCase() === 'n') {
+      // Alt+N → new session (event.code is layout-independent, avoids macOS dead key issues)
+      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyN') {
         event.preventDefault()
         void spawnSession()
       }
 
-      // Ctrl/Cmd+Shift+T → new workspace
-      if (commandKey && event.shiftKey && event.key.toLowerCase() === 't') {
+      // Alt+W → new workspace
+      if (event.altKey && !commandKey && !event.shiftKey && event.code === 'KeyW') {
         event.preventDefault()
         const id = createWorkspace()
         setActiveWorkspace(id)
@@ -526,6 +536,8 @@ function App() {
             setSidebarOpen(false)
           }}
           onKillSession={(id) => void closeSession(id)}
+          onCloseTab={closeTab}
+          onRenameSession={(id, title) => void renameSession(id, title)}
           onNewSession={() => void spawnSession()}
           onReorderWorkspaces={reorderWorkspaces}
           onReorderSessionsInWorkspace={reorderSessionsInWorkspace}

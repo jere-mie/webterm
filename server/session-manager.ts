@@ -1,4 +1,3 @@
-import { basename } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 import { spawn } from 'node-pty'
@@ -7,6 +6,7 @@ import type { Server, Socket } from 'socket.io'
 
 import type {
   CloseSessionPayload,
+  RenameSessionPayload,
   ResizeSessionPayload,
   SessionExitPayload,
   SessionInputPayload,
@@ -24,6 +24,7 @@ const DEFAULT_ROWS = 34
 interface SessionRecord {
   id: string
   title: string
+  customTitle: boolean
   cwd: string
   shell: ShellProfile
   state: SessionState
@@ -57,11 +58,14 @@ export class SessionManager {
     const cwd = normalizeCwd(options.cwd ?? defaultWorkingDirectory())
     const now = Date.now()
     const id = randomUUID()
+    const customTitle = !!(options.title?.trim())
+    const title = customTitle ? options.title!.trim() : shell.label
     const session = this.spawnSessionRecord({
       id,
       cwd,
       shell,
-      title: options.title?.trim() || titleFromCwd(cwd, shell.label),
+      title,
+      customTitle,
       createdAt: now,
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
@@ -159,7 +163,8 @@ export class SessionManager {
     session.buffer = ''
     session.pendingChunk = ''
     session.shell = nextShell
-    session.title = titleFromCwd(cwd, nextShell.label)
+    session.title = nextShell.label
+    session.customTitle = false
     session.cwd = cwd
     session.state = session.attachedSockets.size > 0 ? 'live' : 'detached'
     session.exitCode = null
@@ -190,11 +195,28 @@ export class SessionManager {
     this.emitSessionList()
   }
 
+  renameSession(payload: RenameSessionPayload) {
+    const session = this.requireSession(payload.sessionId)
+    const trimmed = payload.title.trim()
+
+    if (!trimmed) {
+      return this.toSnapshot(session)
+    }
+
+    session.title = trimmed
+    session.customTitle = true
+    this.emitSessionMeta(session)
+    this.emitSessionList()
+
+    return this.toSnapshot(session)
+  }
+
   private spawnSessionRecord(options: {
     id: string
     cwd: string
     shell: ShellProfile
     title: string
+    customTitle: boolean
     createdAt: number
     cols: number
     rows: number
@@ -214,6 +236,7 @@ export class SessionManager {
     const session: SessionRecord = {
       id: options.id,
       title: options.title,
+      customTitle: options.customTitle,
       cwd: options.cwd,
       shell: options.shell,
       state: 'detached',
@@ -288,7 +311,7 @@ export class SessionManager {
   }
 
   private handleOutput(session: SessionRecord, chunk: string) {
-    const { cleanChunk, cwd, pendingChunk } = parseShellMarkers(
+    const { cleanChunk, cwd, title, pendingChunk } = parseShellMarkers(
       chunk,
       session.pendingChunk,
     )
@@ -296,9 +319,19 @@ export class SessionManager {
     session.pendingChunk = pendingChunk
     session.lastActiveAt = Date.now()
 
+    let needsMeta = false
+
+    if (title && !session.customTitle && title !== session.title) {
+      session.title = title
+      needsMeta = true
+    }
+
     if (cwd && cwd !== session.cwd) {
       session.cwd = normalizeCwd(cwd)
-      session.title = titleFromCwd(session.cwd, session.shell.label)
+      needsMeta = true
+    }
+
+    if (needsMeta) {
       this.emitSessionMeta(session)
       this.emitSessionList()
     }
@@ -372,13 +405,6 @@ function defaultWorkingDirectory() {
 
 function normalizeCwd(cwd: string) {
   return cwd.replace(/[\\/]+$/, '') || cwd
-}
-
-function titleFromCwd(cwd: string, shellLabel: string) {
-  const trimmed = cwd.replace(/[\\/]+$/, '')
-  const leaf = basename(trimmed)
-
-  return leaf || shellLabel
 }
 
 function roomName(sessionId: string) {

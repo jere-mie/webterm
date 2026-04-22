@@ -10,6 +10,7 @@ import type {
   AttachSessionPayload,
   CloseSessionPayload,
   HealthPayload,
+  RenameSessionPayload,
   ResizeSessionPayload,
   RestartSessionPayload,
   SessionInputPayload,
@@ -137,6 +138,16 @@ io.on('connection', (socket) => {
       respond?: (ack: SocketAck<unknown>) => void,
     ) => {
       withAck(respond, () => sessionManager.restartSession(payload.sessionId))
+    },
+  )
+
+  socket.on(
+    'rename-session',
+    (
+      payload: RenameSessionPayload,
+      respond?: (ack: SocketAck<unknown>) => void,
+    ) => {
+      withAck(respond, () => sessionManager.renameSession(payload))
     },
   )
 

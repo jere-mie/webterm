@@ -12,8 +12,8 @@ export function CommandDialog({
   return (
     <DialogPrimitive.Root {...props}>
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[rgba(0,0,0,0.75)]" />
-        <DialogPrimitive.Content className="fixed left-1/2 top-[12vh] z-50 w-[min(680px,calc(100vw-1.5rem))] -translate-x-1/2 overflow-hidden rounded-[8px] border border-[rgba(255,255,255,0.1)] bg-[#141414] shadow-[0_24px_80px_rgba(0,0,0,0.6)] focus:outline-none">
+        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-[rgba(0,0,0,0.7)] backdrop-blur-[3px]" />
+        <DialogPrimitive.Content className="fixed left-1/2 top-[10vh] z-50 w-[min(700px,calc(100vw-1.5rem))] -translate-x-1/2 overflow-hidden rounded-[10px] border border-[rgba(255,255,255,0.12)] bg-[#131313] shadow-[0_32px_96px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.04)] focus:outline-none">
           <DialogPrimitive.Title className="sr-only">
             WebTerm command deck
           </DialogPrimitive.Title>
@@ -45,11 +45,11 @@ export function CommandInput({
   ...props
 }: React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>) {
   return (
-    <div className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-3 text-[var(--muted-strong)]">
-      <Search className="h-4 w-4 shrink-0" />
+    <div className="flex items-center gap-3 border-b border-[rgba(255,255,255,0.1)] bg-[rgba(255,255,255,0.03)] px-4 py-3.5 text-[var(--muted-strong)]">
+      <Search className="h-4 w-4 shrink-0 text-[var(--accent)]" />
       <CommandPrimitive.Input
         className={cn(
-          'flex h-9 w-full bg-transparent text-sm outline-none placeholder:text-[var(--muted)]',
+          'flex h-9 w-full bg-transparent text-[13px] text-[var(--text-strong)] outline-none placeholder:text-[var(--muted)]',
           className,
         )}
         {...props}
@@ -122,7 +122,7 @@ export const CommandItem = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <CommandPrimitive.Item
     className={cn(
-      'relative flex cursor-default items-center gap-3 rounded-[5px] border border-transparent px-3 py-2.5 text-sm outline-none transition data-[selected=true]:border-[var(--accent-border)] data-[selected=true]:bg-[var(--accent-bg)] data-[selected=true]:text-[var(--text-strong)] [&_[data-slot=command-icon]]:text-[var(--muted-strong)]',
+      'relative flex cursor-default items-center gap-3 rounded-[6px] border border-transparent px-3 py-2.5 text-[13px] outline-none transition-colors data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-40 data-[selected=true]:border-[rgba(255,255,255,0.08)] data-[selected=true]:bg-[rgba(255,255,255,0.06)] data-[selected=true]:text-[var(--text-strong)] [&_[data-slot=command-icon]]:text-[var(--muted-strong)] data-[selected=true]:[&_[data-slot=command-icon]]:text-[var(--accent)]',
       className,
     )}
     ref={ref}

@@ -105,7 +105,7 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       cursorInactiveStyle: 'outline',
       fontFamily: '"JetBrainsMono Nerd Font", "JetBrains Mono", "IBM Plex Mono", monospace',
       fontSize: 14,
-      lineHeight: 1.28,
+      lineHeight: 1.0,
       scrollback: 5000,
       theme: {
         background: '#0c0c0c',
@@ -161,15 +161,16 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
         window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'hide-from-workspace' }))
         return false
       }
-      if (isMod && event.shiftKey && event.key.toLowerCase() === 'n') {
-        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
-        return false
-      }
-      if (isMod && event.shiftKey && event.key.toLowerCase() === 't') {
-        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-workspace' }))
-        return false
-      }
+      // Alt+N / Alt+W — use event.code to be layout-independent (avoids macOS dead key issue)
       if (event.altKey && !isMod) {
+        if (event.code === 'KeyN') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
+          return false
+        }
+        if (event.code === 'KeyW') {
+          window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-workspace' }))
+          return false
+        }
         if (event.key === 'ArrowUp') {
           window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'alt-prev-workspace' }))
           return false

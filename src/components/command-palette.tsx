@@ -71,7 +71,7 @@ export function CommandPalette({
                   Launch a fresh localhost shell session.
                 </span>
               </div>
-              <span className="shortcut-chip">Shift T</span>
+              <span className="shortcut-chip">Alt N</span>
             </CommandItem>
             <CommandItem
               disabled={!activeSession}
