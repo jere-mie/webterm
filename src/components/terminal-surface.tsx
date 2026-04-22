@@ -108,27 +108,27 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       lineHeight: 1.28,
       scrollback: 5000,
       theme: {
-        background: '#090a08',
-        foreground: '#f7dfb3',
-        cursor: '#f8b54c',
-        cursorAccent: '#130f0b',
-        selectionBackground: 'rgba(247, 191, 96, 0.28)',
-        black: '#090a08',
-        red: '#ef825d',
-        green: '#8acb8d',
-        yellow: '#f8b54c',
-        blue: '#7ab0ff',
-        magenta: '#d1a3ff',
-        cyan: '#7dc8c2',
-        white: '#f7dfb3',
-        brightBlack: '#5f5545',
-        brightRed: '#ff9c7a',
-        brightGreen: '#b5f1a9',
-        brightYellow: '#ffda8a',
-        brightBlue: '#9dc3ff',
-        brightMagenta: '#e0bcff',
-        brightCyan: '#9ce3d9',
-        brightWhite: '#fff4da',
+        background: '#0c0c0c',
+        foreground: '#c8c8c8',
+        cursor: '#3b82f6',
+        cursorAccent: '#0c0c0c',
+        selectionBackground: 'rgba(59,130,246,0.25)',
+        black: '#1a1a1a',
+        red: '#f87171',
+        green: '#4ade80',
+        yellow: '#fbbf24',
+        blue: '#60a5fa',
+        magenta: '#c084fc',
+        cyan: '#22d3ee',
+        white: '#e2e8f0',
+        brightBlack: '#404040',
+        brightRed: '#fca5a5',
+        brightGreen: '#86efac',
+        brightYellow: '#fcd34d',
+        brightBlue: '#93c5fd',
+        brightMagenta: '#d8b4fe',
+        brightCyan: '#67e8f9',
+        brightWhite: '#f8fafc',
       },
     })
     const fitAddon = new FitAddon()
@@ -241,33 +241,7 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       aria-hidden={!isActive}
       className={cn('terminal-stage', isActive ? 'is-active' : 'is-hidden')}
     >
-      <div className="terminal-surface">
-        <div className="terminal-topbar">
-          <div className="flex items-center gap-4">
-            <div className="terminal-stat">
-              <span className="edge-label">Session</span>
-              <strong>{session.title}</strong>
-            </div>
-            <div className="terminal-stat">
-              <span className="edge-label">Shell</span>
-              <strong>{session.shellLabel}</strong>
-            </div>
-          </div>
-          <div className="flex items-center gap-4 text-right">
-            <div className="terminal-stat">
-              <span className="edge-label">State</span>
-              <strong>{session.state}</strong>
-            </div>
-            <div className="terminal-stat">
-              <span className="edge-label">PTY</span>
-              <strong>{session.pid}</strong>
-            </div>
-          </div>
-        </div>
-        <div className="terminal-canvas">
-          <div ref={hostRef} />
-        </div>
-      </div>
+      <div className="terminal-canvas" ref={hostRef} />
     </div>
   )
 }

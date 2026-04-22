@@ -1,14 +1,5 @@
 import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
-import {
-  Activity,
-  Command as CommandIcon,
-  PanelLeft,
-  Plus,
-  Search,
-  Wifi,
-  WifiOff,
-  X,
-} from 'lucide-react'
+import { PanelLeft, Plus, Search, X } from 'lucide-react'
 import { io, type Socket } from 'socket.io-client'
 
 import type { SessionMetaPayload, SessionRemovedPayload, SessionSnapshot, SessionState, SocketAck, SpawnSessionPayload } from '../shared/protocol'
@@ -17,8 +8,7 @@ import {
   TerminalSurface,
   type TerminalSurfaceCommand,
 } from './components/terminal-surface'
-import { Button } from './components/ui/button'
-import { cn, compactId, formatClock, formatRelativeTime } from './lib/utils'
+import { cn } from './lib/utils'
 import './App.css'
 
 function App() {
@@ -44,7 +34,6 @@ function App() {
   const historySessions = [...sessions].sort(
     (left, right) => right.lastActiveAt - left.lastActiveAt,
   )
-  const sessionCounts = summarizeSessions(sessions)
 
   const emitWithAck = useCallback(
     async <T,>(eventName: string, payload?: unknown): Promise<T> => {
@@ -298,263 +287,173 @@ function App() {
   }
 
   return (
-    <div className="relative min-h-screen overflow-hidden">
-      <div className="ambient-orb ambient-orb-left"></div>
-      <div className="ambient-orb ambient-orb-right"></div>
+    <div className="app-root">
+      {/* Mobile overlay */}
       <div
         aria-hidden={!sidebarOpen}
         className={cn('sidebar-overlay', sidebarOpen && 'is-visible')}
         onClick={() => setSidebarOpen(false)}
-      ></div>
+      />
 
-      <div className="mx-auto grid min-h-screen max-w-[1900px] grid-cols-1 gap-4 p-3 xl:grid-cols-[320px_minmax(0,1fr)] xl:p-5">
-        <aside className={cn('sidebar-drawer surface-panel flex flex-col gap-4 p-4 xl:p-5', sidebarOpen && 'is-open')}>
-          <div className="surface-subpanel p-4">
-            <div className="section-kicker">Local Shell Observatory</div>
-            <div className="mt-4 flex items-start justify-between gap-4">
-              <div>
-                <h1 className="display-heading">WebTerm</h1>
-                <p className="mt-3 max-w-[28ch] text-sm text-[var(--muted-strong)]">
-                  A localhost terminal deck with persistent PTY tabs, a command panel,
-                  and a phosphor-lit operator interface.
-                </p>
-              </div>
-              <div className={cn('status-pill', socketState === 'connected' ? 'is-live' : 'is-warn')}>
-                <span className="signal-dot"></span>
-                {socketState === 'connected' ? 'Link live' : 'Link reacquiring'}
-              </div>
-            </div>
+      {/* Sidebar */}
+      <aside className={cn('sidebar', sidebarOpen && 'is-open')}>
+        <div className="sidebar-header">
+          <div className="sidebar-brand">
+            <span className="sidebar-brand-name">webterm</span>
+            <span className={cn('conn-dot', socketState === 'connected' ? 'is-live' : 'is-warn')} />
           </div>
+          <button
+            aria-label="Close sidebar"
+            className="sidebar-close-btn"
+            onClick={() => setSidebarOpen(false)}
+            type="button"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="metric-card">
-              <span className="section-kicker">Tabs</span>
-              <strong className="metric-value">{sessions.length}</strong>
-              <span className="metric-copy">Independent PTY lanes</span>
-            </div>
-            <div className="metric-card">
-              <span className="section-kicker">Live</span>
-              <strong className="metric-value">{sessionCounts.live}</strong>
-              <span className="metric-copy">Attached or running shells</span>
-            </div>
-            <div className="metric-card">
-              <span className="section-kicker">Detached</span>
-              <strong className="metric-value">{sessionCounts.detached}</strong>
-              <span className="metric-copy">Buffered after disconnect</span>
-            </div>
-            <div className="metric-card">
-              <span className="section-kicker">Exited</span>
-              <strong className="metric-value">{sessionCounts.exited}</strong>
-              <span className="metric-copy">Ready to relaunch</span>
-            </div>
-          </div>
+        <div className="sidebar-body">
+          {historySessions.length > 0 && (
+            <div className="sidebar-section-label">Sessions</div>
+          )}
+          {historySessions.map((session) => {
+            const isActive = session.id === activeSessionId
 
-          <div className="surface-subpanel flex min-h-0 flex-1 flex-col p-3">
-            <div className="mb-3 flex items-center justify-between gap-3 px-1">
-              <span className="section-kicker">Session History</span>
-              <span className="text-[0.68rem] uppercase tracking-[0.26em] text-[var(--muted)]">
-                {historySessions.length} logs
-              </span>
-            </div>
-            <div className="session-scroll flex min-h-0 flex-col gap-2">
-              {historySessions.map((session) => {
-                const isActive = session.id === activeSessionId
+            return (
+              <div className={cn('session-item', isActive && 'is-active')} key={session.id}>
+                <button
+                  className="session-item-main"
+                  onClick={() => {
+                    setActiveSessionId(session.id)
+                    setSidebarOpen(false)
+                  }}
+                  type="button"
+                >
+                  <span className={cn('session-state-dot', `state-${session.state}`)} />
+                  <span className="session-item-info">
+                    <span className="session-item-title">{session.title}</span>
+                    <span className="session-item-path">{session.cwd}</span>
+                  </span>
+                </button>
+                <button
+                  aria-label={`Close ${session.title}`}
+                  className="session-item-close"
+                  onClick={() => void closeSession(session.id)}
+                  type="button"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
 
-                return (
+        <div className="sidebar-footer">
+          <button
+            className="new-session-btn"
+            onClick={() => void spawnSession()}
+            type="button"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New session
+          </button>
+        </div>
+      </aside>
+
+      {/* Main workspace */}
+      <main className="workspace">
+        {/* Titlebar with tabs */}
+        <div className="workspace-titlebar">
+          <button
+            aria-label="Open sidebar"
+            className="mobile-menu-btn"
+            onClick={() => setSidebarOpen(true)}
+            type="button"
+          >
+            <PanelLeft className="h-4 w-4" />
+          </button>
+
+          <div className="workspace-tabs" role="tablist">
+            {sessions.map((session) => {
+              const isActive = session.id === activeSessionId
+
+              return (
+                <div
+                  aria-selected={isActive}
+                  className={cn('workspace-tab', isActive && 'is-active')}
+                  key={session.id}
+                  role="tab"
+                >
                   <button
-                    className={cn('history-item', isActive && 'is-active')}
-                    key={session.id}
-                    onClick={() => {
-                      setActiveSessionId(session.id)
-                      setSidebarOpen(false)
-                    }}
+                    className="workspace-tab-btn"
+                    onClick={() => setActiveSessionId(session.id)}
                     type="button"
                   >
-                    <div className="history-item__meta">
-                      <span>{session.state}</span>
-                      <span>{compactId(session.id)}</span>
-                    </div>
-                    <div className="history-item__title">{session.title}</div>
-                    <div className="history-item__path">{session.cwd}</div>
-                    <div className="history-item__footer">
-                      <span>{session.shellLabel}</span>
-                      <span>{formatRelativeTime(session.lastActiveAt)}</span>
-                    </div>
+                    <span className={cn('tab-state-dot', session.state === 'live' && 'is-live')} />
+                    <span className="workspace-tab-title">{session.title}</span>
                   </button>
-                )
-              })}
-            </div>
-          </div>
-
-          <div className="surface-subpanel p-4 text-sm text-[var(--muted-strong)]">
-            <div className="section-kicker">Persistence</div>
-            <p className="mt-3 leading-6">
-              Shell processes stay resident across refreshes and hold for 15 minutes after
-              the last browser disconnect before cleanup.
-            </p>
-          </div>
-        </aside>
-
-        <main className="flex min-h-[calc(100vh-1.5rem)] flex-col gap-4">
-          <header className="surface-panel p-3 xl:p-4">
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Button
-                    aria-label="Toggle session history"
-                    className="xl:hidden"
-                    onClick={() => setSidebarOpen((current) => !current)}
-                    size="icon"
-                    variant="ghost"
+                  <button
+                    aria-label={`Close ${session.title}`}
+                    className="workspace-tab-close"
+                    onClick={() => void closeSession(session.id)}
+                    type="button"
                   >
-                    <PanelLeft className="h-4 w-4" />
-                  </Button>
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-full border border-[rgba(242,191,110,0.24)] bg-[rgba(16,15,11,0.65)] text-[var(--accent-bright)]">
-                      <Activity className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <div className="section-kicker">Active Circuit</div>
-                      <div className="text-lg font-semibold tracking-[0.01em] text-[var(--text-strong)]">
-                        {activeSession?.title ?? 'Boot sequence'}
-                      </div>
-                    </div>
-                  </div>
+                    <X className="h-3 w-3" />
+                  </button>
                 </div>
+              )
+            })}
+          </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button onClick={() => setPaletteOpen(true)} variant="ghost">
-                    <Search className="h-4 w-4" />
-                    Command deck
-                    <span className="shortcut-chip">Ctrl K</span>
-                  </Button>
-                  <Button onClick={() => void spawnSession()} variant="primary">
-                    <Plus className="h-4 w-4" />
-                    New tab
-                  </Button>
-                </div>
+          <div className="workspace-actions">
+            <button
+              className="action-btn"
+              onClick={() => setPaletteOpen(true)}
+              type="button"
+            >
+              <Search className="h-3.5 w-3.5" />
+              <span>Command</span>
+              <span className="shortcut-chip">⌘K</span>
+            </button>
+            <button
+              className="action-btn"
+              onClick={() => void spawnSession()}
+              type="button"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Terminal body */}
+        <div className="workspace-body">
+          {sessions.length > 0 ? (
+            sessions.map((session) => (
+              <TerminalSurface
+                command={terminalCommand}
+                isActive={session.id === activeSessionId}
+                key={session.id}
+                session={session}
+                socket={socketRef.current as Socket}
+              />
+            ))
+          ) : (
+            <div className="boot-screen">
+              <div className="boot-screen-title">
+                {bootState === 'error' ? 'Connection failed' : 'Starting session…'}
               </div>
-
-              <div className="tab-strip">
-                {sessions.map((session) => {
-                  const isActive = session.id === activeSessionId
-
-                  return (
-                    <div className={cn('tab-shell', isActive && 'is-active')} key={session.id}>
-                      <button
-                        className="tab-shell__main"
-                        onClick={() => setActiveSessionId(session.id)}
-                        type="button"
-                      >
-                        <span className={cn('signal-dot tab-signal', session.state !== 'live' && 'is-dim')}></span>
-                        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                          {session.title}
-                        </span>
-                        <span className="tab-shell__meta">{session.shellLabel}</span>
-                      </button>
-                      <button
-                        aria-label={`Close ${session.title}`}
-                        className="tab-shell__close"
-                        onClick={() => void closeSession(session.id)}
-                        type="button"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </header>
-
-          <section className="surface-panel flex min-h-0 flex-1 flex-col overflow-hidden p-3 xl:p-4">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="hero-badge">Loopback only</span>
-                <span className="hero-badge">{activeSession?.shellLabel ?? 'Awaiting shell'}</span>
-                <span className="hero-badge">PID {activeSession?.pid ?? '----'}</span>
-                <span className="hero-badge">{activeSession?.state ?? 'booting'}</span>
-              </div>
-
-              <div className="terminal-info">
-                <div>
-                  <span>Working directory</span>
-                  <strong>{activeSession?.cwd ?? 'Launching session...'}</strong>
-                </div>
-                <div>
-                  <span>Terminal grid</span>
-                  <strong>
-                    {activeSession ? `${activeSession.cols} x ${activeSession.rows}` : 'warming'}
-                  </strong>
-                </div>
-              </div>
-            </div>
-
-            <div className="relative min-h-[540px] flex-1">
-              {sessions.length > 0 ? (
-                sessions.map((session) => (
-                  <TerminalSurface
-                    command={terminalCommand}
-                    isActive={session.id === activeSessionId}
-                    key={session.id}
-                    session={session}
-                    socket={socketRef.current as Socket}
-                  />
-                ))
-              ) : (
-                <div className="boot-panel">
-                  <div className="max-w-xl space-y-4 px-6">
-                    <div className="section-kicker">Operator Console</div>
-                    <h2 className="text-4xl font-semibold tracking-[-0.04em] text-[var(--text-strong)]">
-                      Booting the shell matrix.
-                    </h2>
-                    <p className="mx-auto max-w-lg text-sm leading-7 text-[var(--muted-strong)]">
-                      {bootState === 'error'
-                        ? errorMessage ?? 'The localhost PTY service did not answer.'
-                        : 'The server is establishing the loopback bridge, preparing the PTY buffer, and reconnecting any preserved sessions.'}
-                    </p>
-                    {errorMessage ? (
-                      <div className="status-pill is-warn mx-auto w-fit">
-                        <span className="signal-dot"></span>
-                        {errorMessage}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
+              <p className="boot-screen-msg">
+                {bootState === 'error'
+                  ? errorMessage ?? 'The PTY server did not respond.'
+                  : 'Establishing the loopback bridge and preparing your shell environment.'}
+              </p>
+              {errorMessage && (
+                <div className="boot-screen-err">{errorMessage}</div>
               )}
             </div>
-          </section>
-
-          <footer className="surface-panel flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className={cn('status-pill', socketState === 'connected' ? 'is-live' : 'is-warn')}>
-                {socketState === 'connected' ? (
-                  <Wifi className="h-3.5 w-3.5" />
-                ) : (
-                  <WifiOff className="h-3.5 w-3.5" />
-                )}
-                {socketState === 'connected' ? 'Socket synchronized' : 'Reconnecting transport'}
-              </span>
-              {activeSession ? (
-                <span className="status-pill">
-                  <CommandIcon className="h-3.5 w-3.5" />
-                  Active since {formatClock(activeSession.lastActiveAt)}
-                </span>
-              ) : null}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 text-[0.72rem] uppercase tracking-[0.2em] text-[var(--muted)]">
-              <span>{sessions.length} tabs</span>
-              <span className="utility-divider"></span>
-              <span>{sessionCounts.live} live</span>
-              <span className="utility-divider"></span>
-              <span>{sessionCounts.detached} buffered</span>
-              <span className="utility-divider"></span>
-              <span>{activeSession ? compactId(activeSession.id) : 'idle'}</span>
-            </div>
-          </footer>
-        </main>
-      </div>
+          )}
+        </div>
+      </main>
 
       <CommandPalette
         activeSessionId={activeSessionId}
@@ -589,18 +488,4 @@ function pickActiveSession(currentActive: string | null, sessions: SessionSnapsh
   }
 
   return sessions.at(-1)?.id ?? null
-}
-
-function summarizeSessions(sessions: SessionSnapshot[]) {
-  return sessions.reduce(
-    (summary, session) => {
-      summary[session.state] += 1
-      return summary
-    },
-    {
-      live: 0,
-      detached: 0,
-      exited: 0,
-    } as Record<SessionState, number>,
-  )
 }
