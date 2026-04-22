@@ -1,13 +1,17 @@
-import { startTransition, useCallback, useEffect, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+const isMac = typeof navigator !== 'undefined' && /mac/i.test(navigator.platform)
 import { PanelLeft, Plus, Search, X } from 'lucide-react'
 import { io, type Socket } from 'socket.io-client'
 
-import type { SessionMetaPayload, SessionRemovedPayload, SessionSnapshot, SessionState, SocketAck, SpawnSessionPayload } from '../shared/protocol'
+import type { SessionMetaPayload, SessionRemovedPayload, SessionSnapshot, SocketAck, SpawnSessionPayload } from '../shared/protocol'
 import { CommandPalette, type PaletteAction } from './components/command-palette'
 import {
   TerminalSurface,
   type TerminalSurfaceCommand,
 } from './components/terminal-surface'
+import { WorkspaceSidebar } from './components/workspace-sidebar'
+import { useWorkspaceLayout } from './hooks/useWorkspaceLayout'
 import { cn } from './lib/utils'
 import './App.css'
 
@@ -30,10 +34,10 @@ function App() {
   const [terminalCommand, setTerminalCommand] =
     useState<TerminalSurfaceCommand | null>(null)
 
+  const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
+  const workspace = useWorkspaceLayout(sessionIds)
+
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null
-  const historySessions = [...sessions].sort(
-    (left, right) => right.lastActiveAt - left.lastActiveAt,
-  )
 
   const emitWithAck = useCallback(
     async <T,>(eventName: string, payload?: unknown): Promise<T> => {
@@ -257,7 +261,7 @@ function App() {
         setPaletteOpen(true)
       }
 
-      if (event.shiftKey && event.key.toLowerCase() === 't') {
+      if (event.shiftKey && !commandKey && event.key.toLowerCase() === 't') {
         event.preventDefault()
         void spawnSession()
       }
@@ -268,10 +272,24 @@ function App() {
       }
     }
 
+    // Also handle shortcuts dispatched from inside xterm (which intercepts window keydown)
+    function handleXtermShortcut(event: Event) {
+      const detail = (event as CustomEvent<string>).detail
+      if (detail === 'open-palette') {
+        setPaletteOpen(true)
+      } else if (detail === 'new-session') {
+        void spawnSession()
+      } else if (detail === 'close-session' && activeSessionId) {
+        void closeSession(activeSessionId)
+      }
+    }
+
     window.addEventListener('keydown', handleKeyboardShortcuts)
+    window.addEventListener('webterm:shortcut', handleXtermShortcut)
 
     return () => {
       window.removeEventListener('keydown', handleKeyboardShortcuts)
+      window.removeEventListener('webterm:shortcut', handleXtermShortcut)
     }
   }, [activeSessionId, closeSession, spawnSession])
 
@@ -312,57 +330,30 @@ function App() {
           </button>
         </div>
 
-        <div className="sidebar-body">
-          {historySessions.length > 0 && (
-            <div className="sidebar-section-label">Sessions</div>
-          )}
-          {historySessions.map((session) => {
-            const isActive = session.id === activeSessionId
-
-            return (
-              <div className={cn('session-item', isActive && 'is-active')} key={session.id}>
-                <button
-                  className="session-item-main"
-                  onClick={() => {
-                    setActiveSessionId(session.id)
-                    setSidebarOpen(false)
-                  }}
-                  type="button"
-                >
-                  <span className={cn('session-state-dot', `state-${session.state}`)} />
-                  <span className="session-item-info">
-                    <span className="session-item-title">{session.title}</span>
-                    <span className="session-item-path">{session.cwd}</span>
-                  </span>
-                </button>
-                <button
-                  aria-label={`Close ${session.title}`}
-                  className="session-item-close"
-                  onClick={() => void closeSession(session.id)}
-                  type="button"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </div>
-            )
-          })}
-        </div>
-
-        <div className="sidebar-footer">
-          <button
-            className="new-session-btn"
-            onClick={() => void spawnSession()}
-            type="button"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            New session
-          </button>
-        </div>
+        <WorkspaceSidebar
+          items={workspace.layout.items}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          socketConnected={socketState === 'connected'}
+          onSelectSession={(id) => {
+            setActiveSessionId(id)
+            setSidebarOpen(false)
+          }}
+          onCloseSession={(id) => void closeSession(id)}
+          onNewSession={() => void spawnSession()}
+          onCreateFolder={workspace.createFolder}
+          onRenameFolder={workspace.renameFolder}
+          onDeleteFolder={workspace.deleteFolder}
+          onToggleFolder={workspace.toggleFolder}
+          onMoveSessionToFolder={workspace.moveSessionToFolder}
+          onReorderItems={workspace.reorderItems}
+          onReorderSessionsInFolder={workspace.reorderSessionsInFolder}
+        />
       </aside>
 
       {/* Main workspace */}
       <main className="workspace">
-        {/* Titlebar with tabs */}
+        {/* Titlebar */}
         <div className="workspace-titlebar">
           <button
             aria-label="Open sidebar"
@@ -373,10 +364,10 @@ function App() {
             <PanelLeft className="h-4 w-4" />
           </button>
 
+          {/* Active session indicator + compact tab strip */}
           <div className="workspace-tabs" role="tablist">
             {sessions.map((session) => {
               const isActive = session.id === activeSessionId
-
               return (
                 <div
                   aria-selected={isActive}
@@ -413,7 +404,7 @@ function App() {
             >
               <Search className="h-3.5 w-3.5" />
               <span>Command</span>
-              <span className="shortcut-chip">⌘K</span>
+              <span className="shortcut-chip">{isMac ? '⌘K' : 'Ctrl K'}</span>
             </button>
             <button
               className="action-btn"

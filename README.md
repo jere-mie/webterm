@@ -30,16 +30,16 @@ The production server serves the compiled frontend from `dist` and starts the sa
 
 **Useful scripts**
 
-- `npm run dev` — run the server with Vite middleware for HMR
-- `npm run build` — build the frontend and compile the server TypeScript
-- `npm start` — run the compiled server from `dist-server`
+- `npm run dev` - run the server with Vite middleware for HMR
+- `npm run build` - build the frontend and compile the server TypeScript
+- `npm start` - run the compiled server from `dist-server`
 
 **Project layout (important files)**
 
-- `index.html` — Vite entry HTML
-- `src/` — React frontend
-- `server/` — server-side TypeScript (entry: `server/index.ts`)
-- `shared/protocol.ts` — socket API types used by client and server
+- `index.html` - Vite entry HTML
+- `src/` - React frontend
+- `server/` - server-side TypeScript (entry: `server/index.ts`)
+- `shared/protocol.ts` - socket API types used by client and server
 
 **Notes for contributors**
 

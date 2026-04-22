@@ -103,7 +103,7 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
       convertEol: true,
       cursorBlink: true,
       cursorInactiveStyle: 'outline',
-      fontFamily: 'IBM Plex Mono, monospace',
+      fontFamily: '"JetBrainsMono Nerd Font", "JetBrains Mono", "IBM Plex Mono", monospace',
       fontSize: 14,
       lineHeight: 1.28,
       scrollback: 5000,
@@ -146,6 +146,33 @@ export function TerminalSurface({ command, session, socket, isActive }: Terminal
 
     terminal.open(hostRef.current)
     terminal.writeln('[webterm] attaching to session...')
+
+    // Intercept app-level shortcuts before xterm can swallow them.
+    // Returns false → xterm skips this key; the DOM event still fires on window.
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true
+      const isMod = event.ctrlKey || event.metaKey
+
+      if (isMod && event.key.toLowerCase() === 'k') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'open-palette' }))
+        return false
+      }
+      if (isMod && event.key.toLowerCase() === 'w') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'close-session' }))
+        return false
+      }
+      if (!isMod && event.shiftKey && event.key.toLowerCase() === 't') {
+        window.dispatchEvent(new CustomEvent('webterm:shortcut', { detail: 'new-session' }))
+        return false
+      }
+
+      return true
+    })
+
+    // Refit after the Nerd Font finishes loading to avoid incorrect glyph metrics.
+    void document.fonts.load('14px "JetBrainsMono Nerd Font"').then(() => {
+      fitAndResize()
+    })
 
     const inputSubscription = terminal.onData((data) => {
       socket.emit('input', {
