@@ -39,6 +39,33 @@ export function resolveShell(requestedKind?: ShellKind): ShellProfile {
   return resolveUnixShell(requestedKind)
 }
 
+function buildUnixInitCommands(shell: 'bash' | 'zsh', styledPrompt: boolean) {
+  if (shell === 'zsh') {
+    const commands = [
+      'autoload -Uz add-zsh-hook',
+      'function __webterm_precmd() { printf "\\033]633;CurrentDir=%s\\007" "$PWD" }',
+      'add-zsh-hook precmd __webterm_precmd',
+    ]
+
+    if (styledPrompt) {
+      commands.push('PROMPT="%F{214}%n@%m%f %F{179}%~%f %# "')
+    }
+
+    return commands
+  }
+
+  const commands = [
+    'function __webterm_precmd(){ printf "\\033]633;CurrentDir=%s\\007" "$PWD"; }',
+    'PROMPT_COMMAND=__webterm_precmd',
+  ]
+
+  if (styledPrompt) {
+    commands.push('PS1="\\[\\e[38;5;214m\\]\\u@\\h\\[\\e[0m\\] \\[\\e[38;5;179m\\]\\w\\[\\e[0m\\] \\$ "')
+  }
+
+  return commands
+}
+
 export function parseShellMarkers(
   chunk: string,
   pendingChunk: string,
@@ -195,13 +222,7 @@ function resolveUnixShell(requestedKind?: ShellKind): ShellProfile {
       label: 'Zsh',
       command: resolvedCandidate.path,
       args: ['-i'],
-      initCommands: [
-        'autoload -Uz add-zsh-hook',
-        'function __webterm_precmd() { printf "\\033]633;CurrentDir=%s\\007" "$PWD" }',
-        'add-zsh-hook precmd __webterm_precmd',
-        'PROMPT="%F{214}%n@%m%f %F{179}%~%f %# "',
-        'clear',
-      ],
+      initCommands: [...buildUnixInitCommands('zsh', process.platform !== 'darwin'), 'clear'],
     }
   }
 
@@ -210,12 +231,7 @@ function resolveUnixShell(requestedKind?: ShellKind): ShellProfile {
     label: 'Bash',
     command: resolvedCandidate.path,
     args: ['--noprofile', '--norc', '-i'],
-    initCommands: [
-      'function __webterm_precmd(){ printf "\\033]633;CurrentDir=%s\\007" "$PWD"; }',
-      'PROMPT_COMMAND=__webterm_precmd',
-      'PS1="\\[\\e[38;5;214m\\]\\u@\\h\\[\\e[0m\\] \\[\\e[38;5;179m\\]\\w\\[\\e[0m\\] \\$ "',
-      'clear',
-    ],
+    initCommands: [...buildUnixInitCommands('bash', process.platform !== 'darwin'), 'clear'],
   }
 }
 
@@ -278,13 +294,7 @@ export function resolveCustomShellPath(customPath: string): ShellProfile {
       label: customPath,
       command: customPath,
       args: ['-i'],
-      initCommands: [
-        'autoload -Uz add-zsh-hook',
-        'function __webterm_precmd() { printf "\\033]633;CurrentDir=%s\\007" "$PWD" }',
-        'add-zsh-hook precmd __webterm_precmd',
-        'PROMPT="%F{214}%n@%m%f %F{179}%~%f %# "',
-        'clear',
-      ],
+      initCommands: [...buildUnixInitCommands('zsh', process.platform !== 'darwin'), 'clear'],
     }
   }
 
@@ -294,12 +304,7 @@ export function resolveCustomShellPath(customPath: string): ShellProfile {
       label: customPath,
       command: customPath,
       args: ['--noprofile', '--norc', '-i'],
-      initCommands: [
-        'function __webterm_precmd(){ printf "\\033]633;CurrentDir=%s\\007" "$PWD"; }',
-        'PROMPT_COMMAND=__webterm_precmd',
-        'PS1="\\[\\e[38;5;214m\\]\\u@\\h\\[\\e[0m\\] \\[\\e[38;5;179m\\]\\w\\[\\e[0m\\] \\$ "',
-        'clear',
-      ],
+      initCommands: [...buildUnixInitCommands('bash', process.platform !== 'darwin'), 'clear'],
     }
   }
 
