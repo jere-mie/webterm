@@ -232,6 +232,24 @@ export function TerminalSurface({
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true
 
+      if (event.key === 'Enter') {
+        const modifierCount =
+          Number(event.shiftKey) + Number(event.ctrlKey) + Number(event.altKey) + Number(event.metaKey)
+
+        if (modifierCount === 1) {
+          const modifiedEnterSequence = getModifiedEnterSequence(event)
+
+          if (modifiedEnterSequence) {
+            event.preventDefault()
+            socket.emit('input', {
+              sessionId: session.id,
+              data: modifiedEnterSequence,
+            })
+            return false
+          }
+        }
+      }
+
       // Ctrl+Shift+F → open terminal search (before altKey guard)
       if (event.ctrlKey && event.shiftKey && event.code === 'KeyF') {
         event.preventDefault()
@@ -503,4 +521,12 @@ export function TerminalSurface({
       )}
     </div>
   )
+}
+
+function getModifiedEnterSequence(event: Pick<KeyboardEvent, 'altKey' | 'ctrlKey' | 'metaKey' | 'shiftKey'>) {
+  if (event.shiftKey) return '\u001b[13;2u'
+  if (event.altKey) return '\u001b[13;3u'
+  if (event.ctrlKey) return '\u001b[13;5u'
+  if (event.metaKey) return '\u001b[13;9u'
+  return null
 }
