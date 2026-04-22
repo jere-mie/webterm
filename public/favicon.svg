@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none">
+	<rect width="48" height="48" rx="8" fill="#863bff" />
+	<polyline points="15,20 22,24 15,28" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+	<rect x="28" y="26" width="8" height="3" rx="1.5" fill="#ffffff" />
+	<title>WebTerm favicon</title>
+</svg>

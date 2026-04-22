@@ -1,0 +1,100 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Syne:wght@500;700;800&display=swap');
+@import "tailwindcss";
+
+:root {
+  --bg: #080806;
+  --panel: #11100d;
+  --text: #d8c39d;
+  --text-strong: #fff0cb;
+  --muted: #8d7b5c;
+  --muted-strong: #b8a37d;
+  --line: rgba(242, 191, 110, 0.16);
+  --accent: #f5b44c;
+  --accent-bright: #ffd482;
+  --shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+  --font-display: 'Syne', sans-serif;
+  --font-sans: 'IBM Plex Sans', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  color-scheme: dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  min-height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, rgba(245, 180, 76, 0.14), transparent 28%),
+    radial-gradient(circle at 80% 20%, rgba(86, 124, 196, 0.12), transparent 24%),
+    linear-gradient(180deg, #0a0a08 0%, #080806 100%);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+body::before,
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+body::before {
+  background-image:
+    linear-gradient(rgba(255, 229, 176, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 229, 176, 0.03) 1px, transparent 1px);
+  background-size: 96px 96px;
+  mask-image: radial-gradient(circle at center, black 30%, transparent 82%);
+  opacity: 0.25;
+}
+
+body::after {
+  background:
+    radial-gradient(circle at 20% 20%, rgba(255, 255, 255, 0.03), transparent 16%),
+    radial-gradient(circle at 80% 45%, rgba(255, 255, 255, 0.025), transparent 22%),
+    radial-gradient(circle at 50% 80%, rgba(255, 255, 255, 0.025), transparent 24%);
+  mix-blend-mode: screen;
+}
+
+#root {
+  min-height: 100svh;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+p,
+h1,
+h2,
+h3 {
+  margin: 0;
+}
+
+::selection {
+  background: rgba(255, 212, 130, 0.28);
+  color: var(--text-strong);
+}
+
+@media (max-width: 1024px) {
+  body {
+    overflow: auto;
+  }
+}
