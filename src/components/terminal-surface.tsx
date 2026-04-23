@@ -18,6 +18,10 @@ import type { AppSettings } from './settings-modal'
 import { cn } from '../lib/utils'
 import '@xterm/xterm/css/xterm.css'
 
+const TERMINAL_FONT_FAMILY =
+  '"JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", "JetBrains Mono Nerd Font", "JetBrains Mono", "IBM Plex Mono", monospace'
+const TERMINAL_FONT_LOAD_TARGET = '14px "JetBrainsMono Nerd Font Mono"'
+
 export interface TerminalSurfaceCommand {
   sessionId: string
   kind: 'clear' | 'focus' | 'fit' | 'search'
@@ -159,7 +163,7 @@ export function TerminalSurface({
       convertEol: false,
       cursorBlink: true,
       cursorInactiveStyle: 'outline',
-      fontFamily: '"JetBrainsMono Nerd Font", "JetBrains Mono", "IBM Plex Mono", monospace',
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: settingsRef.current?.fontSize ?? 14,
       lineHeight: 1.0,
       scrollback: 5000,
@@ -320,7 +324,7 @@ export function TerminalSurface({
     })
 
     // Refit after the Nerd Font finishes loading to avoid incorrect glyph metrics.
-    void document.fonts.load('14px "JetBrainsMono Nerd Font"').then(() => {
+    void document.fonts.load(TERMINAL_FONT_LOAD_TARGET).then(() => {
       fitAndResize()
     })
 
