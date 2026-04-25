@@ -1,285 +1,36 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { Socket } from 'socket.io-client'
 
-const STORAGE_KEY = 'webterm.workspace-layout'
+import type { LayoutSyncPayload } from '../../shared/protocol'
+import {
+  defaultLayout,
+  resolveActiveSession,
+  type PersistedLayout,
+  type Workspace,
+} from '../../shared/workspace-layout'
 
-export interface Workspace {
-  id: string
-  name: string
-  sessionIds: string[]
-  openSessionIds: string[]
-}
+export type { Workspace } from '../../shared/workspace-layout'
 
-interface PersistedLayout {
-  version: 3
-  workspaces: Workspace[]
-  activeWorkspaceId: string | null
-  lastActiveSessionPerWorkspace: Record<string, string>
-}
-
-function makeId(prefix: string): string {
-  return `${prefix}-${Math.random().toString(36).slice(2, 9)}`
-}
-
-function makeWorkspace(name: string): Workspace {
-  return { id: makeId('ws'), name, sessionIds: [], openSessionIds: [] }
-}
-
-function normalizeWorkspace(workspace: Workspace): Workspace {
-  const seen = new Set<string>()
-  const openSessionIds: string[] = []
-
-  for (const sessionId of workspace.openSessionIds) {
-    if (seen.has(sessionId)) {
-      continue
-    }
-
-    seen.add(sessionId)
-    openSessionIds.push(sessionId)
-  }
-
-  const hiddenSessionIds: string[] = []
-
-  for (const sessionId of workspace.sessionIds) {
-    if (seen.has(sessionId)) {
-      continue
-    }
-
-    seen.add(sessionId)
-    hiddenSessionIds.push(sessionId)
-  }
-
-  return {
-    ...workspace,
-    sessionIds: [...openSessionIds, ...hiddenSessionIds],
-    openSessionIds,
-  }
-}
-
-function defaultLayout(): PersistedLayout {
-  const workspace = makeWorkspace('Default')
-
-  return {
-    version: 3,
-    workspaces: [workspace],
-    activeWorkspaceId: workspace.id,
-    lastActiveSessionPerWorkspace: {},
-  }
-}
-
-function migrateFromV2(raw: Record<string, unknown>): PersistedLayout | null {
-  if (!Array.isArray(raw.workspaces) || !Array.isArray(raw.sidebarItems)) {
-    return null
-  }
-
-  const workspaceOrder: string[] = []
-
-  for (const item of raw.sidebarItems as Array<{
-    type: string
-    workspaceId?: string
-    workspaceIds?: string[]
-  }>) {
-    if (item.type === 'workspace' && item.workspaceId) {
-      workspaceOrder.push(item.workspaceId)
-    } else if (item.type === 'folder' && Array.isArray(item.workspaceIds)) {
-      workspaceOrder.push(...item.workspaceIds)
-    }
-  }
-
-  const workspacesById = new Map<
-    string,
-    { id: string; name: string; sessionIds: string[] }
-  >()
-
-  for (const workspace of raw.workspaces as Array<{
-    id: string
-    name: string
-    sessionIds: string[]
-  }>) {
-    workspacesById.set(workspace.id, workspace)
-  }
-
-  const seenWorkspaceIds = new Set<string>()
-  const orderedWorkspaces: Workspace[] = []
-
-  for (const workspaceId of [...workspaceOrder, ...workspacesById.keys()]) {
-    if (seenWorkspaceIds.has(workspaceId)) {
-      continue
-    }
-
-    seenWorkspaceIds.add(workspaceId)
-    const workspace = workspacesById.get(workspaceId)
-
-    if (!workspace) {
-      continue
-    }
-
-    orderedWorkspaces.push(
-      normalizeWorkspace({
-        id: workspace.id,
-        name: workspace.name,
-        sessionIds: workspace.sessionIds,
-        openSessionIds: [...workspace.sessionIds],
-      }),
-    )
-  }
-
-  if (orderedWorkspaces.length === 0) {
-    return null
-  }
-
-  const activeWorkspaceId =
-    typeof raw.activeWorkspaceId === 'string'
-      ? raw.activeWorkspaceId
-      : orderedWorkspaces[0].id
-  const lastActiveSessionPerWorkspace =
-    typeof raw.lastActiveSessionPerWorkspace === 'object' &&
-    raw.lastActiveSessionPerWorkspace !== null
-      ? (raw.lastActiveSessionPerWorkspace as Record<string, string>)
-      : {}
-
-  return {
-    version: 3,
-    workspaces: orderedWorkspaces,
-    activeWorkspaceId,
-    lastActiveSessionPerWorkspace,
-  }
-}
-
-function loadLayout(): PersistedLayout {
-  try {
-    if (typeof window === 'undefined') {
-      return defaultLayout()
-    }
-
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-
-    if (!raw) {
-      return defaultLayout()
-    }
-
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-
-    if (parsed.version === 3 && Array.isArray(parsed.workspaces)) {
-      return parsed as PersistedLayout
-    }
-
-    if (parsed.version === 2) {
-      return migrateFromV2(parsed) ?? defaultLayout()
-    }
-
-    return defaultLayout()
-  } catch {
-    return defaultLayout()
-  }
-}
-
-function saveLayout(layout: PersistedLayout): void {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(layout))
-}
-
-function repairLayout(
-  layout: PersistedLayout,
-  serverSessionIds: string[],
-): PersistedLayout {
-  const serverSessionIdSet = new Set(serverSessionIds)
-  const seenSessionIds = new Set<string>()
-
-  const workspaces = layout.workspaces.map((workspace) => {
-    const sessionIds = workspace.sessionIds.filter((sessionId) => {
-      if (!serverSessionIdSet.has(sessionId) || seenSessionIds.has(sessionId)) {
-        return false
-      }
-
-      seenSessionIds.add(sessionId)
-      return true
-    })
-    const sessionIdSet = new Set(sessionIds)
-
-    return normalizeWorkspace({
-      ...workspace,
-      sessionIds,
-      openSessionIds: (workspace.openSessionIds ?? sessionIds).filter((sessionId) =>
-        sessionIdSet.has(sessionId),
-      ),
-    })
+async function requestJson<T>(input: RequestInfo, init?: RequestInit) {
+  const response = await fetch(input, {
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers ?? {}),
+    },
+    ...init,
   })
 
-  const finalWorkspaces =
-    workspaces.length > 0 ? workspaces : [makeWorkspace('Default')]
-  const workspaceIdSet = new Set(finalWorkspaces.map((workspace) => workspace.id))
+  const data = (await response.json()) as T | { error?: string }
 
-  let activeWorkspaceId = layout.activeWorkspaceId
-  if (!activeWorkspaceId || !workspaceIdSet.has(activeWorkspaceId)) {
-    activeWorkspaceId = finalWorkspaces[0].id
+  if (!response.ok) {
+    const errorMessage =
+      typeof data === 'object' && data !== null && 'error' in data && typeof data.error === 'string'
+        ? data.error
+        : `Request failed with status ${response.status}.`
+    throw new Error(errorMessage)
   }
 
-  const lastActiveSessionPerWorkspace: Record<string, string> = {}
-
-  for (const [workspaceId, sessionId] of Object.entries(
-    layout.lastActiveSessionPerWorkspace ?? {},
-  )) {
-    const workspace = finalWorkspaces.find((candidate) => candidate.id === workspaceId)
-
-    if (workspace && workspace.openSessionIds.includes(sessionId)) {
-      lastActiveSessionPerWorkspace[workspaceId] = sessionId
-    }
-  }
-
-  return {
-    version: 3,
-    workspaces: finalWorkspaces,
-    activeWorkspaceId,
-    lastActiveSessionPerWorkspace,
-  }
-}
-
-function resolveActiveSession(
-  workspace: Workspace | undefined,
-  lastActiveSessionPerWorkspace: Record<string, string>,
-): string | null {
-  if (!workspace || workspace.openSessionIds.length === 0) {
-    return null
-  }
-
-  const storedSessionId = lastActiveSessionPerWorkspace[workspace.id]
-
-  if (storedSessionId && workspace.openSessionIds.includes(storedSessionId)) {
-    return storedSessionId
-  }
-
-  return workspace.openSessionIds[0]
-}
-
-function pickReplacementWorkspaceId(
-  previousWorkspaces: Workspace[],
-  nextWorkspaces: Workspace[],
-  currentWorkspaceId: string | null,
-) {
-  if (currentWorkspaceId && nextWorkspaces.some((workspace) => workspace.id === currentWorkspaceId)) {
-    return currentWorkspaceId
-  }
-
-  if (!currentWorkspaceId) {
-    return nextWorkspaces[0]?.id ?? null
-  }
-
-  const previousIndex = previousWorkspaces.findIndex(
-    (workspace) => workspace.id === currentWorkspaceId,
-  )
-
-  if (previousIndex === -1) {
-    return nextWorkspaces[0]?.id ?? null
-  }
-
-  return nextWorkspaces[Math.min(previousIndex, nextWorkspaces.length - 1)]?.id ?? null
-}
-
-function isWorkspace(value: Workspace | null): value is Workspace {
-  return value !== null
+  return data as T
 }
 
 export interface AppStateReturn {
@@ -287,447 +38,240 @@ export interface AppStateReturn {
   activeWorkspaceId: string | null
   activeWorkspace: Workspace | undefined
   activeSessionId: string | null
-  createWorkspace: (name?: string) => string
-  deleteWorkspace: (workspaceId: string) => void
-  renameWorkspace: (workspaceId: string, name: string) => void
-  setActiveWorkspace: (workspaceId: string) => void
-  addSessionToWorkspace: (sessionId: string, workspaceId?: string) => void
-  removeSession: (sessionId: string) => void
-  closeTab: (sessionId: string) => void
-  setActiveSession: (sessionId: string) => void
+  createWorkspace: (name?: string) => Promise<string>
+  deleteWorkspace: (workspaceId: string) => Promise<void>
+  renameWorkspace: (workspaceId: string, name: string) => Promise<void>
+  setActiveWorkspace: (workspaceId: string) => Promise<void>
+  closeTab: (sessionId: string) => Promise<void>
+  setActiveSession: (sessionId: string) => Promise<void>
   moveSessionToWorkspace: (
     sessionId: string,
     targetWorkspaceId: string,
     atIndex?: number,
-  ) => void
+  ) => Promise<void>
   reorderSessionsInWorkspace: (
     workspaceId: string,
     newSessionIds: string[],
-  ) => void
-  reorderOpenTabs: (workspaceId: string, newOpenSessionIds: string[]) => void
-  reorderWorkspaces: (newWorkspaceIds: string[]) => void
+  ) => Promise<void>
+  reorderOpenTabs: (workspaceId: string, newOpenSessionIds: string[]) => Promise<void>
+  reorderWorkspaces: (newWorkspaceIds: string[]) => Promise<void>
 }
 
-export function useAppState(serverSessionIds: string[]): AppStateReturn {
-  const [layout, setLayout] = useState<PersistedLayout>(() => loadLayout())
-  const sessionIdsKey = serverSessionIds.join(',')
-  const stableServerSessionIds = useMemo(
-    () => (sessionIdsKey ? sessionIdsKey.split(',') : []),
-    [sessionIdsKey],
-  )
-  const serverSessionIdsRef = useRef(stableServerSessionIds)
+export function useAppState(socket: Socket | null): AppStateReturn {
+  const [layout, setLayout] = useState<PersistedLayout>(() => defaultLayout())
 
-  useEffect(() => {
-    serverSessionIdsRef.current = stableServerSessionIds
-  }, [stableServerSessionIds])
+  const syncLayout = useCallback((nextLayout: PersistedLayout) => {
+    setLayout(nextLayout)
+  }, [])
 
-  const repairedLayout = useMemo(
-    () => repairLayout(layout, stableServerSessionIds),
-    [layout, stableServerSessionIds],
-  )
+  const syncLayoutFromResponse = useCallback(
+    <T extends { layout?: PersistedLayout }>(payload: T) => {
+      if (payload.layout) {
+        syncLayout(payload.layout)
+      }
 
-  useEffect(() => {
-    saveLayout(repairedLayout)
-  }, [repairedLayout])
-
-  const updateLayout = useCallback(
-    (updater: (current: PersistedLayout) => PersistedLayout) => {
-      setLayout((current) => {
-        const repairedCurrent = repairLayout(current, serverSessionIdsRef.current)
-        return repairLayout(updater(repairedCurrent), serverSessionIdsRef.current)
-      })
+      return payload
     },
-    [],
+    [syncLayout],
   )
 
-  const activeWorkspace = repairedLayout.workspaces.find(
-    (workspace) => workspace.id === repairedLayout.activeWorkspaceId,
+  useEffect(() => {
+    let cancelled = false
+
+    void requestJson<{ layout: PersistedLayout }>('/api/layout')
+      .then((payload) => {
+        if (!cancelled) {
+          syncLayout(payload.layout)
+        }
+      })
+      .catch(() => {})
+
+    return () => {
+      cancelled = true
+    }
+  }, [syncLayout])
+
+  useEffect(() => {
+    if (!socket) {
+      return
+    }
+
+    const handleLayoutSync = ({ layout: nextLayout }: LayoutSyncPayload) => {
+      syncLayout(nextLayout)
+    }
+
+    socket.on('layout-sync', handleLayoutSync)
+
+    return () => {
+      socket.off('layout-sync', handleLayoutSync)
+    }
+  }, [socket, syncLayout])
+
+  const activeWorkspace = useMemo(
+    () => layout.workspaces.find((workspace) => workspace.id === layout.activeWorkspaceId),
+    [layout.activeWorkspaceId, layout.workspaces],
   )
-  const activeSessionId = resolveActiveSession(
-    activeWorkspace,
-    repairedLayout.lastActiveSessionPerWorkspace,
+  const activeSessionId = useMemo(
+    () => resolveActiveSession(activeWorkspace, layout.lastActiveSessionPerWorkspace),
+    [activeWorkspace, layout.lastActiveSessionPerWorkspace],
   )
 
   const createWorkspace = useCallback(
-    (name?: string): string => {
-      const workspace = makeWorkspace(name ?? 'Workspace')
+    async (name?: string) => {
+      const payload = await requestJson<{ workspaceId: string; layout: PersistedLayout }>(
+        '/api/workspaces',
+        {
+          method: 'POST',
+          body: JSON.stringify({ name }),
+        },
+      )
 
-      updateLayout((current) => ({
-        ...current,
-        workspaces: [...current.workspaces, workspace],
-      }))
-
-      return workspace.id
+      syncLayout(payload.layout)
+      return payload.workspaceId
     },
-    [updateLayout],
+    [syncLayout],
   )
 
   const deleteWorkspace = useCallback(
-    (workspaceId: string) => {
-      updateLayout((current) => {
-        if (current.workspaces.length <= 1) {
-          return current
-        }
+    async (workspaceId: string) => {
+      const payload = await requestJson<{ layout: PersistedLayout }>(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}`,
+        {
+          method: 'DELETE',
+        },
+      )
 
-        const workspaceIndex = current.workspaces.findIndex(
-          (workspace) => workspace.id === workspaceId,
-        )
-
-        if (workspaceIndex === -1) {
-          return current
-        }
-
-        const workspace = current.workspaces[workspaceIndex]
-        const remainingWorkspaces = current.workspaces.filter(
-          (candidate) => candidate.id !== workspaceId,
-        )
-        const targetIndex = Math.min(workspaceIndex, remainingWorkspaces.length - 1)
-
-        const workspaces = remainingWorkspaces.map((candidate, index) => {
-          if (index !== targetIndex) {
-            return candidate
-          }
-
-          return normalizeWorkspace({
-            ...candidate,
-            sessionIds: [...candidate.sessionIds, ...workspace.sessionIds],
-            openSessionIds: [...candidate.openSessionIds, ...workspace.openSessionIds],
-          })
-        })
-
-        const lastActiveSessionPerWorkspace = {
-          ...current.lastActiveSessionPerWorkspace,
-        }
-        delete lastActiveSessionPerWorkspace[workspaceId]
-
-        return {
-          ...current,
-          workspaces,
-          activeWorkspaceId: pickReplacementWorkspaceId(
-            current.workspaces,
-            workspaces,
-            current.activeWorkspaceId,
-          ),
-          lastActiveSessionPerWorkspace,
-        }
-      })
+      syncLayoutFromResponse(payload)
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const renameWorkspace = useCallback(
-    (workspaceId: string, name: string) => {
-      updateLayout((current) => ({
-        ...current,
-        workspaces: current.workspaces.map((workspace) =>
-          workspace.id === workspaceId ? { ...workspace, name } : workspace,
+    async (workspaceId: string, name: string) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ name }),
+          },
         ),
-      }))
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const setActiveWorkspace = useCallback(
-    (workspaceId: string) => {
-      updateLayout((current) => ({
-        ...current,
-        activeWorkspaceId: workspaceId,
-      }))
+    async (workspaceId: string) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ activate: true }),
+          },
+        ),
+      )
     },
-    [updateLayout],
-  )
-
-  const addSessionToWorkspace = useCallback(
-    (sessionId: string, workspaceId?: string) => {
-      updateLayout((current) => {
-        const targetWorkspaceId = workspaceId ?? current.activeWorkspaceId
-
-        if (!targetWorkspaceId) {
-          return current
-        }
-
-        const workspaces = current.workspaces.map((workspace) => {
-          const nextSessionIds = workspace.sessionIds.filter(
-            (candidateId) => candidateId !== sessionId,
-          )
-          const nextOpenSessionIds = workspace.openSessionIds.filter(
-            (candidateId) => candidateId !== sessionId,
-          )
-
-          if (workspace.id !== targetWorkspaceId) {
-            return normalizeWorkspace({
-              ...workspace,
-              sessionIds: nextSessionIds,
-              openSessionIds: nextOpenSessionIds,
-            })
-          }
-
-          return normalizeWorkspace({
-            ...workspace,
-            sessionIds: [...nextSessionIds, sessionId],
-            openSessionIds: [...nextOpenSessionIds, sessionId],
-          })
-        })
-
-        return { ...current, workspaces }
-      })
-    },
-    [updateLayout],
-  )
-
-  const removeSession = useCallback(
-    (sessionId: string) => {
-      updateLayout((current) => {
-        const removedWorkspaceIds = new Set<string>()
-        const workspaces = current.workspaces
-          .map((workspace) => {
-            if (
-              !workspace.sessionIds.includes(sessionId) &&
-              !workspace.openSessionIds.includes(sessionId)
-            ) {
-              return workspace
-            }
-
-            const sessionIds = workspace.sessionIds.filter(
-              (candidateId) => candidateId !== sessionId,
-            )
-            const openSessionIds = workspace.openSessionIds.filter(
-              (candidateId) => candidateId !== sessionId,
-            )
-
-            if (sessionIds.length === 0) {
-              removedWorkspaceIds.add(workspace.id)
-              return null
-            }
-
-            return normalizeWorkspace({ ...workspace, sessionIds, openSessionIds })
-          })
-          .filter(isWorkspace)
-
-        const lastActiveSessionPerWorkspace = Object.fromEntries(
-          Object.entries(current.lastActiveSessionPerWorkspace).filter(
-            ([workspaceId, activeId]) =>
-              !removedWorkspaceIds.has(workspaceId) && activeId !== sessionId,
-          ),
-        )
-
-        return {
-          ...current,
-          workspaces,
-          activeWorkspaceId: pickReplacementWorkspaceId(
-            current.workspaces,
-            workspaces,
-            current.activeWorkspaceId,
-          ),
-          lastActiveSessionPerWorkspace,
-        }
-      })
-    },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const closeTab = useCallback(
-    (sessionId: string) => {
-      updateLayout((current) => ({
-        ...current,
-        workspaces: current.workspaces.map((workspace) =>
-          normalizeWorkspace({
-            ...workspace,
-            openSessionIds: workspace.openSessionIds.filter(
-              (candidateId) => candidateId !== sessionId,
-            ),
-          }),
+    async (sessionId: string) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/sessions/${encodeURIComponent(sessionId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ open: false }),
+          },
         ),
-        lastActiveSessionPerWorkspace: Object.fromEntries(
-          Object.entries(current.lastActiveSessionPerWorkspace).filter(
-            ([, activeId]) => activeId !== sessionId,
-          ),
-        ),
-      }))
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const setActiveSession = useCallback(
-    (sessionId: string) => {
-      updateLayout((current) => {
-        const ownerWorkspace = current.workspaces.find((workspace) =>
-          workspace.sessionIds.includes(sessionId),
-        )
-
-        if (!ownerWorkspace) {
-          return current
-        }
-
-        const workspaces = current.workspaces.map((workspace) => {
-          if (workspace.id !== ownerWorkspace.id) {
-            return workspace
-          }
-
-          return workspace.openSessionIds.includes(sessionId)
-            ? workspace
-            : normalizeWorkspace({
-                ...workspace,
-                openSessionIds: [...workspace.openSessionIds, sessionId],
-              })
-        })
-
-        return {
-          ...current,
-          workspaces,
-          activeWorkspaceId: ownerWorkspace.id,
-          lastActiveSessionPerWorkspace: {
-            ...current.lastActiveSessionPerWorkspace,
-            [ownerWorkspace.id]: sessionId,
+    async (sessionId: string) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/sessions/${encodeURIComponent(sessionId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ activate: true }),
           },
-        }
-      })
+        ),
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const moveSessionToWorkspace = useCallback(
-    (sessionId: string, targetWorkspaceId: string, atIndex?: number) => {
-      updateLayout((current) => {
-        const sourceWorkspace = current.workspaces.find((workspace) =>
-          workspace.sessionIds.includes(sessionId),
-        )
-
-        if (!sourceWorkspace || sourceWorkspace.id === targetWorkspaceId) {
-          return current
-        }
-
-        const wasOpen = sourceWorkspace.openSessionIds.includes(sessionId)
-        const workspaces = current.workspaces.map((workspace) => {
-          if (workspace.id === sourceWorkspace.id) {
-            return normalizeWorkspace({
-              ...workspace,
-              sessionIds: workspace.sessionIds.filter(
-                (candidateId) => candidateId !== sessionId,
-              ),
-              openSessionIds: workspace.openSessionIds.filter(
-                (candidateId) => candidateId !== sessionId,
-              ),
-            })
-          }
-
-          if (workspace.id !== targetWorkspaceId) {
-            return workspace
-          }
-
-          const insertIndex =
-            atIndex !== undefined
-              ? Math.min(atIndex, workspace.sessionIds.length)
-              : workspace.sessionIds.length
-          const sessionIds = [...workspace.sessionIds]
-          sessionIds.splice(insertIndex, 0, sessionId)
-
-          const openSessionIds = wasOpen
-            ? (() => {
-                const nextOpenSessionIds = [...workspace.openSessionIds]
-                nextOpenSessionIds.splice(
-                  Math.min(insertIndex, nextOpenSessionIds.length),
-                  0,
-                  sessionId,
-                )
-                return nextOpenSessionIds
-              })()
-            : workspace.openSessionIds
-
-          return normalizeWorkspace({ ...workspace, sessionIds, openSessionIds })
-        })
-
-        return { ...current, workspaces }
-      })
+    async (sessionId: string, targetWorkspaceId: string, atIndex?: number) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/sessions/${encodeURIComponent(sessionId)}`,
+          {
+            method: 'PATCH',
+            body: JSON.stringify({ workspaceId: targetWorkspaceId, atIndex }),
+          },
+        ),
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const reorderSessionsInWorkspace = useCallback(
-    (workspaceId: string, newSessionIds: string[]) => {
-      updateLayout((current) => ({
-        ...current,
-        workspaces: current.workspaces.map((workspace) => {
-          if (workspace.id !== workspaceId) {
-            return workspace
-          }
-
-          const openSessionIdSet = new Set(workspace.openSessionIds)
-          const nextOpenSessionIds = newSessionIds.filter((sessionId) =>
-            openSessionIdSet.has(sessionId),
-          )
-          const hiddenSessionIds = newSessionIds.filter(
-            (sessionId) => !openSessionIdSet.has(sessionId),
-          )
-
-          return normalizeWorkspace({
-            ...workspace,
-            sessionIds: [...nextOpenSessionIds, ...hiddenSessionIds],
-            openSessionIds: nextOpenSessionIds,
-          })
-        }),
-      }))
+    async (workspaceId: string, newSessionIds: string[]) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/sessions/reorder`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ sessionIds: newSessionIds }),
+          },
+        ),
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const reorderOpenTabs = useCallback(
-    (workspaceId: string, newOpenSessionIds: string[]) => {
-      updateLayout((current) => ({
-        ...current,
-        workspaces: current.workspaces.map((workspace) => {
-          if (workspace.id !== workspaceId) {
-            return workspace
-          }
-
-          const hiddenSessionIds = workspace.sessionIds.filter(
-            (sessionId) => !newOpenSessionIds.includes(sessionId),
-          )
-
-          return normalizeWorkspace({
-            ...workspace,
-            sessionIds: [...newOpenSessionIds, ...hiddenSessionIds],
-            openSessionIds: newOpenSessionIds,
-          })
-        }),
-      }))
+    async (workspaceId: string, newOpenSessionIds: string[]) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>(
+          `/api/workspaces/${encodeURIComponent(workspaceId)}/tabs/reorder`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ sessionIds: newOpenSessionIds }),
+          },
+        ),
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   const reorderWorkspaces = useCallback(
-    (newWorkspaceIds: string[]) => {
-      updateLayout((current) => {
-        const workspaceMap = new Map(
-          current.workspaces.map((workspace) => [workspace.id, workspace]),
-        )
-        const workspaces = newWorkspaceIds
-          .map((workspaceId) => workspaceMap.get(workspaceId) ?? null)
-          .filter(isWorkspace)
-
-        for (const workspace of current.workspaces) {
-          if (!newWorkspaceIds.includes(workspace.id)) {
-            workspaces.push(workspace)
-          }
-        }
-
-        return { ...current, workspaces }
-      })
+    async (newWorkspaceIds: string[]) => {
+      await syncLayoutFromResponse(
+        await requestJson<{ layout: PersistedLayout }>('/api/workspaces/reorder', {
+          method: 'POST',
+          body: JSON.stringify({ workspaceIds: newWorkspaceIds }),
+        }),
+      )
     },
-    [updateLayout],
+    [syncLayoutFromResponse],
   )
 
   return {
-    workspaces: repairedLayout.workspaces,
-    activeWorkspaceId: repairedLayout.activeWorkspaceId,
+    workspaces: layout.workspaces,
+    activeWorkspaceId: layout.activeWorkspaceId,
     activeWorkspace,
     activeSessionId,
     createWorkspace,
     deleteWorkspace,
     renameWorkspace,
     setActiveWorkspace,
-    addSessionToWorkspace,
-    removeSession,
     closeTab,
     setActiveSession,
     moveSessionToWorkspace,

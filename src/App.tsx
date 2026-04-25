@@ -42,12 +42,6 @@ interface SpawnSessionOptions {
   focus?: boolean
 }
 
-interface PendingSpawn {
-  sessionId: string
-  workspaceId?: string
-  focus?: boolean
-}
-
 function getInitialSidebarWidth(): number {
   try {
     const stored = window.localStorage.getItem(SIDEBAR_WIDTH_KEY)
@@ -133,9 +127,14 @@ function SortableTab({ session, isActive, isBelling, onSelect, onClose }: Sortab
 
 
 function App() {
-  const socketRef = useRef<Socket | null>(null)
   const spawnLockRef = useRef(false)
-  const pendingSpawnsRef = useRef<PendingSpawn[]>([])
+  const socket = useMemo(
+    () =>
+      io({
+        transports: ['websocket'],
+      }),
+    [],
+  )
   const [sessions, setSessions] = useState<SessionSnapshot[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
@@ -152,8 +151,6 @@ function App() {
   const [bellSessions, setBellSessions] = useState<Set<string>>(new Set())
   const bellTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  const sessionIds = useMemo(() => sessions.map((s) => s.id), [sessions])
-
   const {
     workspaces,
     activeWorkspaceId,
@@ -163,24 +160,35 @@ function App() {
     deleteWorkspace,
     renameWorkspace,
     setActiveWorkspace,
-    addSessionToWorkspace,
-    removeSession,
     closeTab,
     setActiveSession,
     moveSessionToWorkspace,
     reorderSessionsInWorkspace,
     reorderOpenTabs,
     reorderWorkspaces,
-  } = useAppState(sessionIds)
+  } = useAppState(socket)
+
+  const reportActionError = useCallback((error: unknown) => {
+    setBootState('error')
+    setErrorMessage(
+      error instanceof Error ? error.message : 'WebTerm could not apply that change.',
+    )
+  }, [])
+
+  const runLayoutAction = useCallback(
+    (operation: Promise<unknown>) => {
+      void operation
+        .then(() => {
+          setBootState('ready')
+          setErrorMessage(null)
+        })
+        .catch(reportActionError)
+    },
+    [reportActionError],
+  )
 
   const emitWithAck = useCallback(
     async <T,>(eventName: string, payload?: unknown): Promise<T> => {
-      const socket = socketRef.current
-
-      if (!socket) {
-        throw new Error('WebSocket transport is not ready yet.')
-      }
-
       return new Promise<T>((resolve, reject) => {
         socket.emit(eventName, payload, (ack: SocketAck<T>) => {
           if (ack.ok) {
@@ -192,7 +200,7 @@ function App() {
         })
       })
     },
-    [],
+    [socket],
   )
 
   const spawnSession = useCallback(
@@ -207,14 +215,11 @@ function App() {
           shell: settings.shell || undefined,
           customShellPath: settings.customShellPath || undefined,
           ...payload,
+          workspaceId: options?.workspaceId ?? payload.workspaceId,
+          focus: options?.focus ?? payload.focus,
         }
         const nextSession = await emitWithAck<SessionSnapshot>('spawn', mergedPayload)
 
-        pendingSpawnsRef.current.push({
-          sessionId: nextSession.id,
-          workspaceId: options?.workspaceId,
-          focus: options?.focus,
-        })
         startTransition(() => {
           setSessions((currentSessions) => {
             if (currentSessions.some((session) => session.id === nextSession.id)) {
@@ -240,32 +245,6 @@ function App() {
     [emitWithAck],
   )
 
-  useEffect(() => {
-    if (pendingSpawnsRef.current.length === 0) {
-      return
-    }
-
-    const liveSessionIds = new Set(sessions.map((session) => session.id))
-    const remainingSpawns: PendingSpawn[] = []
-
-    for (const pendingSpawn of pendingSpawnsRef.current) {
-      if (!liveSessionIds.has(pendingSpawn.sessionId)) {
-        remainingSpawns.push(pendingSpawn)
-        continue
-      }
-
-      addSessionToWorkspace(pendingSpawn.sessionId, pendingSpawn.workspaceId)
-
-      if (pendingSpawn.focus !== false) {
-        setActiveSession(pendingSpawn.sessionId)
-      } else if (pendingSpawn.workspaceId) {
-        setActiveWorkspace(pendingSpawn.workspaceId)
-      }
-    }
-
-    pendingSpawnsRef.current = remainingSpawns
-  }, [sessions, addSessionToWorkspace, setActiveSession, setActiveWorkspace])
-
   const closeSession = useCallback(
     async (sessionId: string) => {
       await emitWithAck('close-session', { sessionId })
@@ -290,18 +269,17 @@ function App() {
   }, [])
 
   const createWorkspaceWithSession = useCallback(async () => {
-    const workspaceId = createWorkspace()
+    const workspaceId = await createWorkspace()
     if (
       typeof window !== 'undefined' &&
       window.matchMedia(MOBILE_SIDEBAR_MEDIA_QUERY).matches
     ) {
       setSidebarOpen(true)
     }
-    setActiveWorkspace(workspaceId)
     setRenamingWorkspaceId(workspaceId)
     await spawnSession({}, { workspaceId })
     return workspaceId
-  }, [createWorkspace, setActiveWorkspace, spawnSession])
+  }, [createWorkspace, spawnSession])
 
   const handlePaletteAction = useCallback(
     async (action: PaletteAction) => {
@@ -322,7 +300,7 @@ function App() {
           if (activeSessionId) issueTerminalCommand(activeSessionId, 'clear')
           return
         case 'hide-from-workspace':
-          if (activeSessionId) closeTab(activeSessionId)
+          if (activeSessionId) runLayoutAction(closeTab(activeSessionId))
           return
         case 'kill-session':
           if (activeSessionId) await closeSession(activeSessionId)
@@ -335,16 +313,10 @@ function App() {
           return
       }
     },
-    [activeSessionId, sessions, closeSession, closeTab, spawnSession],
+    [activeSessionId, sessions, closeSession, closeTab, runLayoutAction, spawnSession],
   )
 
   useEffect(() => {
-    const socket = io({
-      transports: ['websocket'],
-    })
-
-    socketRef.current = socket
-
     function syncSessionList(nextSessions: SessionSnapshot[]) {
       startTransition(() => {
         setSessions(nextSessions)
@@ -354,9 +326,11 @@ function App() {
 
       if (nextSessions.length === 0 && !spawnLockRef.current) {
         spawnLockRef.current = true
-        void spawnSession().finally(() => {
-          spawnLockRef.current = false
-        })
+        runLayoutAction(
+          spawnSession().finally(() => {
+            spawnLockRef.current = false
+          }),
+        )
       }
     }
 
@@ -384,7 +358,6 @@ function App() {
           currentSessions.filter((session) => session.id !== sessionId),
         )
       })
-      removeSession(sessionId)
     }
 
     socket.on('connect', () => {
@@ -423,10 +396,9 @@ function App() {
 
     return () => {
       socket.close()
-      socketRef.current = null
       window.removeEventListener('webterm:bell', handleBell)
     }
-  }, [removeSession, spawnSession])
+  }, [runLayoutAction, socket, spawnSession])
 
   useEffect(() => {
     function getAllWorkspaceIds(): string[] {
@@ -450,25 +422,25 @@ function App() {
 
       if (!event.shiftKey && event.code === 'KeyN') {
         event.preventDefault()
-        void spawnSession()
+        runLayoutAction(spawnSession())
         return
       }
 
       if (!event.shiftKey && event.code === 'KeyM') {
         event.preventDefault()
-        void createWorkspaceWithSession()
+        runLayoutAction(createWorkspaceWithSession())
         return
       }
 
       if (event.shiftKey && event.code === 'KeyW' && activeSessionId) {
         event.preventDefault()
-        void closeSession(activeSessionId)
+        runLayoutAction(closeSession(activeSessionId))
         return
       }
 
       if (!event.shiftKey && event.code === 'KeyW' && activeSessionId) {
         event.preventDefault()
-        closeTab(activeSessionId)
+        runLayoutAction(closeTab(activeSessionId))
         return
       }
 
@@ -480,7 +452,11 @@ function App() {
           const currentIdx = tabIds.indexOf(activeSessionId)
           if (currentIdx !== -1) {
             const newIdx = (currentIdx - 1 + tabIds.length) % tabIds.length
-            if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, currentIdx, newIdx))
+            if (activeWorkspaceId) {
+              runLayoutAction(
+                reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, currentIdx, newIdx)),
+              )
+            }
           }
         }
         return
@@ -493,7 +469,11 @@ function App() {
           const currentIdx = tabIds.indexOf(activeSessionId)
           if (currentIdx !== -1) {
             const newIdx = (currentIdx + 1) % tabIds.length
-            if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, currentIdx, newIdx))
+            if (activeWorkspaceId) {
+              runLayoutAction(
+                reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, currentIdx, newIdx)),
+              )
+            }
           }
         }
         return
@@ -506,7 +486,7 @@ function App() {
           const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
           if (currentIdx !== -1) {
             const newIdx = (currentIdx - 1 + allWsIds.length) % allWsIds.length
-            reorderWorkspaces(arrayMove(allWsIds, currentIdx, newIdx))
+            runLayoutAction(reorderWorkspaces(arrayMove(allWsIds, currentIdx, newIdx)))
           }
         }
         return
@@ -519,7 +499,7 @@ function App() {
           const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
           if (currentIdx !== -1) {
             const newIdx = (currentIdx + 1) % allWsIds.length
-            reorderWorkspaces(arrayMove(allWsIds, currentIdx, newIdx))
+            runLayoutAction(reorderWorkspaces(arrayMove(allWsIds, currentIdx, newIdx)))
           }
         }
         return
@@ -535,7 +515,9 @@ function App() {
         if (allWsIds.length === 0) return
         const currentIdx = allWsIds.indexOf(activeWorkspaceId ?? '')
         const delta = event.key === 'ArrowDown' ? 1 : -1
-        setActiveWorkspace(allWsIds[(currentIdx + delta + allWsIds.length) % allWsIds.length])
+        runLayoutAction(
+          setActiveWorkspace(allWsIds[(currentIdx + delta + allWsIds.length) % allWsIds.length]),
+        )
         return
       }
 
@@ -545,7 +527,9 @@ function App() {
         if (tabIds.length === 0) return
         const currentIdx = tabIds.indexOf(activeSessionId ?? '')
         const delta = event.key === 'ArrowRight' ? 1 : -1
-        setActiveSession(tabIds[(currentIdx + delta + tabIds.length) % tabIds.length])
+        runLayoutAction(
+          setActiveSession(tabIds[(currentIdx + delta + tabIds.length) % tabIds.length]),
+        )
       }
     }
 
@@ -558,43 +542,43 @@ function App() {
           setPaletteOpen(true)
           break
         case 'new-session':
-          void spawnSession()
+          runLayoutAction(spawnSession())
           break
         case 'new-workspace':
-          void createWorkspaceWithSession()
+          runLayoutAction(createWorkspaceWithSession())
           break
         case 'kill-session':
           if (activeSessionId) {
-            void closeSession(activeSessionId)
+            runLayoutAction(closeSession(activeSessionId))
           }
           break
         case 'hide-from-workspace':
-          if (activeSessionId) closeTab(activeSessionId)
+          if (activeSessionId) runLayoutAction(closeTab(activeSessionId))
           break
         case 'alt-prev-workspace': {
           if (allWsIds.length === 0) break
           const idx = allWsIds.indexOf(activeWorkspaceId ?? '')
-          setActiveWorkspace(allWsIds[(idx - 1 + allWsIds.length) % allWsIds.length])
+          runLayoutAction(setActiveWorkspace(allWsIds[(idx - 1 + allWsIds.length) % allWsIds.length]))
           break
         }
         case 'alt-next-workspace': {
           if (allWsIds.length === 0) break
           const idx = allWsIds.indexOf(activeWorkspaceId ?? '')
-          setActiveWorkspace(allWsIds[(idx + 1) % allWsIds.length])
+          runLayoutAction(setActiveWorkspace(allWsIds[(idx + 1) % allWsIds.length]))
           break
         }
         case 'alt-prev-tab': {
           const tabIds = activeWorkspace?.openSessionIds ?? []
           if (tabIds.length === 0) break
           const idx = tabIds.indexOf(activeSessionId ?? '')
-          setActiveSession(tabIds[(idx - 1 + tabIds.length) % tabIds.length])
+          runLayoutAction(setActiveSession(tabIds[(idx - 1 + tabIds.length) % tabIds.length]))
           break
         }
         case 'alt-next-tab': {
           const tabIds = activeWorkspace?.openSessionIds ?? []
           if (tabIds.length === 0) break
           const idx = tabIds.indexOf(activeSessionId ?? '')
-          setActiveSession(tabIds[(idx + 1) % tabIds.length])
+          runLayoutAction(setActiveSession(tabIds[(idx + 1) % tabIds.length]))
           break
         }
         case 'alt-shift-prev-tab': {
@@ -603,7 +587,9 @@ function App() {
           const idx = tabIds.indexOf(activeSessionId)
           if (idx === -1) break
           const newIdx = (idx - 1 + tabIds.length) % tabIds.length
-          if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, idx, newIdx))
+          if (activeWorkspaceId) {
+            runLayoutAction(reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, idx, newIdx)))
+          }
           break
         }
         case 'alt-shift-next-tab': {
@@ -612,7 +598,9 @@ function App() {
           const idx = tabIds.indexOf(activeSessionId)
           if (idx === -1) break
           const newIdx = (idx + 1) % tabIds.length
-          if (activeWorkspaceId) reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, idx, newIdx))
+          if (activeWorkspaceId) {
+            runLayoutAction(reorderOpenTabs(activeWorkspaceId, arrayMove(tabIds, idx, newIdx)))
+          }
           break
         }
         case 'alt-shift-prev-workspace': {
@@ -620,7 +608,7 @@ function App() {
           const idx = allWsIds.indexOf(activeWorkspaceId ?? '')
           if (idx === -1) break
           const newIdx = (idx - 1 + allWsIds.length) % allWsIds.length
-          reorderWorkspaces(arrayMove(allWsIds, idx, newIdx))
+          runLayoutAction(reorderWorkspaces(arrayMove(allWsIds, idx, newIdx)))
           break
         }
         case 'alt-shift-next-workspace': {
@@ -628,7 +616,7 @@ function App() {
           const idx = allWsIds.indexOf(activeWorkspaceId ?? '')
           if (idx === -1) break
           const newIdx = (idx + 1) % allWsIds.length
-          reorderWorkspaces(arrayMove(allWsIds, idx, newIdx))
+          runLayoutAction(reorderWorkspaces(arrayMove(allWsIds, idx, newIdx)))
           break
         }
         case 'search':
@@ -654,6 +642,7 @@ function App() {
     createWorkspaceWithSession,
     reorderOpenTabs,
     reorderWorkspaces,
+    runLayoutAction,
     setActiveSession,
     setActiveWorkspace,
     spawnSession,
@@ -712,7 +701,7 @@ function App() {
     const oldIdx = openTabIds.indexOf(active.id as string)
     const newIdx = openTabIds.indexOf(over.id as string)
     if (oldIdx !== -1 && newIdx !== -1) {
-      reorderOpenTabs(activeWorkspaceId, arrayMove(openTabIds, oldIdx, newIdx))
+      runLayoutAction(reorderOpenTabs(activeWorkspaceId, arrayMove(openTabIds, oldIdx, newIdx)))
     }
   }
 
@@ -752,25 +741,43 @@ function App() {
           activeSessionId={activeSessionId}
           renamingWorkspaceId={renamingWorkspaceId}
           onRenamingWorkspaceChange={setRenamingWorkspaceId}
-          onSelectWorkspace={setActiveWorkspace}
-          onDeleteWorkspace={deleteWorkspace}
-          onRenameWorkspace={renameWorkspace}
+          onSelectWorkspace={(workspaceId) => {
+            runLayoutAction(setActiveWorkspace(workspaceId))
+          }}
+          onDeleteWorkspace={(workspaceId) => {
+            runLayoutAction(deleteWorkspace(workspaceId))
+          }}
+          onRenameWorkspace={(workspaceId, name) => {
+            runLayoutAction(renameWorkspace(workspaceId, name))
+          }}
           onCreateWorkspace={() => {
-            void createWorkspaceWithSession()
+            runLayoutAction(createWorkspaceWithSession())
           }}
           onSelectSession={(id) => {
-            setActiveSession(id)
+            runLayoutAction(setActiveSession(id))
             setSidebarOpen(false)
           }}
-          onKillSession={(id) => void closeSession(id)}
-          onCloseTab={closeTab}
-          onRenameSession={(id, title) => void renameSession(id, title)}
+          onKillSession={(id) => {
+            runLayoutAction(closeSession(id))
+          }}
+          onCloseTab={(sessionId) => {
+            runLayoutAction(closeTab(sessionId))
+          }}
+          onRenameSession={(id, title) => {
+            runLayoutAction(renameSession(id, title))
+          }}
           onNewSession={(workspaceId) =>
-            void spawnSession({}, workspaceId ? { workspaceId } : undefined)
+            runLayoutAction(spawnSession({}, workspaceId ? { workspaceId } : undefined))
           }
-          onReorderWorkspaces={reorderWorkspaces}
-          onReorderSessionsInWorkspace={reorderSessionsInWorkspace}
-          onMoveSessionToWorkspace={moveSessionToWorkspace}
+          onReorderWorkspaces={(workspaceIds) => {
+            runLayoutAction(reorderWorkspaces(workspaceIds))
+          }}
+          onReorderSessionsInWorkspace={(workspaceId, sessionIds) => {
+            runLayoutAction(reorderSessionsInWorkspace(workspaceId, sessionIds))
+          }}
+          onMoveSessionToWorkspace={(sessionId, workspaceId, atIndex) => {
+            runLayoutAction(moveSessionToWorkspace(sessionId, workspaceId, atIndex))
+          }}
         />
       </aside>
 
@@ -808,8 +815,12 @@ function App() {
                     session={session}
                     isActive={session.id === activeSessionId}
                     isBelling={bellSessions.has(session.id)}
-                    onSelect={() => setActiveSession(session.id)}
-                    onClose={() => closeTab(session.id)}
+                    onSelect={() => {
+                      runLayoutAction(setActiveSession(session.id))
+                    }}
+                    onClose={() => {
+                      runLayoutAction(closeTab(session.id))
+                    }}
                   />
                 ))}
               </div>
@@ -851,7 +862,7 @@ function App() {
                 key={session.id}
                 session={session}
                 settings={appSettings}
-                socket={socketRef.current as Socket}
+                socket={socket as Socket}
               />
             ))
           ) : (
@@ -875,11 +886,11 @@ function App() {
       <CommandPalette
         activeSessionId={activeSessionId}
         onAction={(action) => {
-          void handlePaletteAction(action)
+          runLayoutAction(handlePaletteAction(action))
         }}
         onOpenChange={setPaletteOpen}
         onSelectSession={(sessionId) => {
-          setActiveSession(sessionId)
+          runLayoutAction(setActiveSession(sessionId))
           issueTerminalCommand(sessionId, 'focus')
         }}
         open={paletteOpen}

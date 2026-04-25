@@ -33,6 +33,10 @@ export interface SpawnSessionPayload {
   customShellPath?: string
   cwd?: string
   title?: string
+  workspaceId?: string
+  focus?: boolean
+  open?: boolean
+  startupCommand?: string
 }
 
 export interface AttachSessionPayload {
@@ -99,6 +103,10 @@ export interface HealthPayload {
   ok: true
   host: string
   port: number
+}
+
+export interface LayoutSyncPayload {
+  layout: import('./workspace-layout.js').PersistedLayout
 }
 
 export interface AckSuccess<T> {

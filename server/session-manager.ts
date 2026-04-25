@@ -48,12 +48,20 @@ interface SessionRecord {
   pendingChunk: string
   subscriptions: IDisposable[]
   detachTimer: NodeJS.Timeout | null
+  startupCommand: string | null
+}
+
+interface SessionManagerOptions {
+  onSessionClosed?: (sessionId: string) => void
 }
 
 export class SessionManager {
   private readonly sessions = new Map<string, SessionRecord>()
 
-  constructor(private readonly io: Server) {
+  constructor(
+    private readonly io: Server,
+    private readonly options: SessionManagerOptions = {},
+  ) {
     ensureNodePtySpawnHelperExecutable()
   }
 
@@ -81,6 +89,7 @@ export class SessionManager {
       createdAt: now,
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
+      startupCommand: options.startupCommand?.trim() || null,
     })
 
     this.sessions.set(id, session)
@@ -205,6 +214,7 @@ export class SessionManager {
       sessionId: session.id,
     })
     this.emitSessionList()
+    this.options.onSessionClosed?.(session.id)
   }
 
   renameSession(payload: RenameSessionPayload) {
@@ -232,6 +242,7 @@ export class SessionManager {
     createdAt: number
     cols: number
     rows: number
+    startupCommand: string | null
   }) {
     const initialPty = spawn(options.shell.command, options.shell.args, {
       name: 'xterm-256color',
@@ -264,6 +275,7 @@ export class SessionManager {
       pendingChunk: '',
       subscriptions: [],
       detachTimer: null,
+      startupCommand: options.startupCommand,
     }
 
     this.hydrateRuntime(session)
@@ -295,9 +307,15 @@ export class SessionManager {
 
     session.subscriptions = [outputSubscription, exitSubscription]
 
-    const initScript = `${session.shell.initCommands.join('\r')}\r`
+    const startupCommands = [...session.shell.initCommands]
+    if (session.startupCommand) {
+      startupCommands.push(session.startupCommand)
+    }
+
+    const initScript =
+      startupCommands.length > 0 ? `${startupCommands.join('\r')}\r` : ''
     setTimeout(() => {
-      if (this.sessions.has(session.id) || session.state !== 'exited') {
+      if (initScript && (this.sessions.has(session.id) || session.state !== 'exited')) {
         session.pty.write(initScript)
       }
     }, 40)

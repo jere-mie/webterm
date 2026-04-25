@@ -24,21 +24,78 @@ WebTerm is a terminal multiplexer that runs in your browser. It spawns real PTY 
 
 ```bash
 npm install
-npm run dev
+npm exec -- webterm dev
 ```
 
 Open the port reported by the server. The default is `http://127.0.0.1:3001`, or whatever `WEBTERM_PORT` is set to.
+If you want a bare `webterm ...` command on your PATH, run `npm link` once from the repo root.
 
 ---
 
 ## Build & run (production)
 
 ```bash
-npm run build:start
+npm exec -- webterm build-start
 ```
 
 The production server serves the compiled frontend from `dist/` and exposes the same API/socket endpoints.
-For a detached run, use `npm run build:start:background`; it prints the app URL after startup, and you can later use `npm run stop:background`.
+For a detached run, use `npm exec -- webterm build-start-background`; it prints the app URL after startup, and you can later use `npm exec -- webterm stop-background`.
+
+---
+
+## CLI
+
+The repo exposes a `webterm` CLI. It mirrors the existing script workflows and can also control a running app over the local WebTerm API.
+
+```bash
+npm exec -- webterm status
+npm exec -- webterm workspaces create "Release Debugging" --activate
+npm exec -- webterm sessions create --workspace "Release Debugging" --title "Server logs" --cwd "C:\path\to\repo" --command "Set-Location .\server"
+```
+
+If you run `npm link`, the same commands become:
+
+```bash
+webterm status
+webterm workspaces create "Release Debugging" --activate
+webterm sessions create --workspace "Release Debugging" --title "Server logs" --cwd "C:\path\to\repo" --command "Set-Location .\server"
+```
+
+### Script commands
+
+| Command | Description |
+|---|---|
+| `webterm dev` | Dev server with Vite HMR on port 3001+ |
+| `webterm build` | Compile frontend + server TypeScript |
+| `webterm lint` | Run the repo lint command |
+| `webterm start` | Run the compiled production server |
+| `webterm start-background` | Run the compiled production server as a detached process |
+| `webterm stop-background` | Stop the detached background process |
+| `webterm build-start` | Build first, then run the compiled production server |
+| `webterm build-start-background` | Build first, then start the compiled production server in the background |
+
+### App control commands
+
+| Command | Description |
+|---|---|
+| `webterm status` | Resolve the active local WebTerm server URL |
+| `webterm shells` | List the available shell profiles |
+| `webterm state --json` | Print the full workspace/session state snapshot |
+| `webterm workspaces list` | List workspaces and open-tab counts |
+| `webterm workspaces create <name>` | Create a workspace |
+| `webterm workspaces rename <workspace> <name>` | Rename a workspace by ID or exact name |
+| `webterm workspaces delete <workspace>` | Delete a workspace |
+| `webterm workspaces activate <workspace>` | Make a workspace active in the UI |
+| `webterm sessions list [--workspace <workspace>]` | List sessions, optionally scoped to a workspace |
+| `webterm sessions create ...` | Create a session, place it in a workspace, and optionally run a startup command after shell init |
+| `webterm sessions activate <sessionId>` | Focus a session and surface its tab |
+| `webterm sessions hide <sessionId>` | Hide a session from the active workspace tab strip without killing it |
+| `webterm sessions move <sessionId> <workspace>` | Move a session to another workspace |
+| `webterm sessions rename <sessionId> <title>` | Rename a session |
+| `webterm sessions kill <sessionId>` | Terminate a PTY session |
+| `webterm sessions restart <sessionId>` | Restart a PTY session |
+| `webterm sessions input <sessionId> <text>` | Send raw input to a session |
+| `webterm sessions run <sessionId> <command>` | Run a command in an existing session |
 
 ---
 
@@ -79,12 +136,12 @@ Killing a session from the sidebar (✕ button on a session row) terminates the 
 
 | Command | Description |
 |---|---|
-| `npm run dev` | Dev server with Vite HMR on port 3001+ |
-| `npm run build` | Compile frontend + server TypeScript |
-| `npm run build:start` | Build first, then run the compiled production server |
-| `npm run build:start:background` | Start the compiled production server as a detached process |
-| `npm start` | Run the compiled production server in the foreground |
-| `npm run stop:background` | Stop the detached background process |
+| `npm run dev` | Equivalent to `webterm dev` |
+| `npm run build` | Equivalent to `webterm build` |
+| `npm run build:start` | Equivalent to `webterm build-start` |
+| `npm run build:start:background` | Equivalent to `webterm build-start-background` |
+| `npm start` | Equivalent to `webterm start` |
+| `npm run stop:background` | Equivalent to `webterm stop-background` |
 
 ---
 
@@ -107,6 +164,7 @@ shared/protocol.ts     Socket API types (shared by client + server)
 ## Notes for contributors
 
 - `server/index.ts` respects `WEBTERM_PORT` (falls back to 3001, auto-increments if busy).
+- Workspace layout is now server-managed and persisted in `logs/webterm-layout.json`, so CLI mutations and open browser clients stay in sync.
 - The server runs Vite in middleware mode during development so HMR works alongside `/api` and `/socket.io`.
 - All `TerminalSurface` components remain mounted regardless of visibility to keep PTY sockets attached and prevent the 15-minute detach timeout from killing background sessions.
 - `server/session-manager.ts` repairs execute permissions on node-pty's Unix `spawn-helper` at startup when needed so PTY creation works on macOS/Linux installs with missing execute bits.

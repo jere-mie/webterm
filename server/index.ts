@@ -10,6 +10,7 @@ import type {
   AttachSessionPayload,
   CloseSessionPayload,
   HealthPayload,
+  LayoutSyncPayload,
   RenameSessionPayload,
   ResizeSessionPayload,
   RestartSessionPayload,
@@ -19,10 +20,14 @@ import type {
 } from '../shared/protocol.js'
 import { SessionManager } from './session-manager.js'
 import { listAvailableShells } from './shell.js'
+import { WorkspaceLayoutStore } from './workspace-layout-store.js'
 
 const projectRoot = process.cwd()
 const host = '127.0.0.1'
 const defaultPort = resolvePort(process.env.WEBTERM_PORT ?? process.env.PORT ?? '3001')
+const logsDir = path.resolve(projectRoot, 'logs')
+const layoutFilePath = path.join(logsDir, 'webterm-layout.json')
+const runtimeStateFilePath = path.join(logsDir, 'webterm-server-state.json')
 
 const app = express()
 const httpServer = createHttpServer(app)
@@ -32,7 +37,20 @@ const io = new Server(httpServer, {
   },
 })
 
-const sessionManager = new SessionManager(io)
+const layoutStoreRef: { current: WorkspaceLayoutStore | null } = {
+  current: null,
+}
+const sessionManager = new SessionManager(io, {
+  onSessionClosed: (sessionId) => {
+    layoutStoreRef.current?.removeSession(sessionId)
+  },
+})
+const layoutStore = new WorkspaceLayoutStore(
+  io,
+  layoutFilePath,
+  () => sessionManager.listSessions().map((session) => session.id),
+)
+layoutStoreRef.current = layoutStore
 
 app.use(express.json())
 
@@ -50,6 +68,204 @@ app.get('/api/health', (_request, response) => {
 
 app.get('/api/shells', (_request, response) => {
   response.json({ shells: listAvailableShells() })
+})
+
+app.get('/api/layout', (_request, response) => {
+  response.json({ layout: layoutStore.getLayout() })
+})
+
+app.get('/api/sessions', (_request, response) => {
+  response.json({ sessions: sessionManager.listSessions() })
+})
+
+app.get('/api/state', (_request, response) => {
+  response.json({
+    layout: layoutStore.getLayout(),
+    sessions: sessionManager.listSessions(),
+  })
+})
+
+app.post('/api/workspaces', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    const name = optionalString(body.name)
+    const workspaceId = optionalString(body.workspaceId)
+    const activate = body.activate === true
+    const createdWorkspaceId = layoutStore.createWorkspace(name, workspaceId)
+
+    if (activate) {
+      layoutStore.setActiveWorkspace(createdWorkspaceId)
+    }
+
+    response.status(201).json({
+      workspaceId: createdWorkspaceId,
+      layout: layoutStore.getLayout(),
+    })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.patch('/api/workspaces/:workspaceId', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    const { workspaceId } = request.params
+    const name = optionalString(body.name)
+
+    if (name !== undefined) {
+      const trimmedName = name.trim()
+      if (!trimmedName) {
+        throw new Error('Workspace name cannot be empty.')
+      }
+
+      layoutStore.renameWorkspace(workspaceId, trimmedName)
+    }
+
+    if (body.activate === true) {
+      layoutStore.setActiveWorkspace(workspaceId)
+    }
+
+    response.json({ layout: layoutStore.getLayout() })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.delete('/api/workspaces/:workspaceId', (request, response) => {
+  try {
+    layoutStore.deleteWorkspace(request.params.workspaceId)
+    response.json({ layout: layoutStore.getLayout() })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/workspaces/reorder', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    layoutStore.reorderWorkspaces(requiredStringArray(body.workspaceIds, 'workspaceIds'))
+    response.json({ layout: layoutStore.getLayout() })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/workspaces/:workspaceId/sessions/reorder', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    layoutStore.reorderSessionsInWorkspace(
+      request.params.workspaceId,
+      requiredStringArray(body.sessionIds, 'sessionIds'),
+    )
+    response.json({ layout: layoutStore.getLayout() })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/workspaces/:workspaceId/tabs/reorder', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    layoutStore.reorderOpenTabs(
+      request.params.workspaceId,
+      requiredStringArray(body.sessionIds, 'sessionIds'),
+    )
+    response.json({ layout: layoutStore.getLayout() })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/sessions', (request, response) => {
+  try {
+    const payload = parseSpawnPayload(request.body)
+    const session = createManagedSession(payload)
+    response.status(201).json({
+      session,
+      layout: layoutStore.getLayout(),
+    })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.patch('/api/sessions/:sessionId', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    const { sessionId } = request.params
+    const title = optionalString(body.title)
+    const workspaceId = optionalString(body.workspaceId)
+    const atIndex = optionalNumber(body.atIndex)
+    const open = optionalBoolean(body.open)
+    const activate = body.activate === true
+
+    if (title !== undefined) {
+      sessionManager.renameSession({ sessionId, title })
+    }
+
+    if (workspaceId !== undefined) {
+      layoutStore.moveSessionToWorkspace(sessionId, workspaceId, atIndex)
+    }
+
+    if (open === false) {
+      layoutStore.closeTab(sessionId)
+    } else if (open === true || activate) {
+      layoutStore.setActiveSession(sessionId)
+    }
+
+    response.json({
+      session: sessionManager.listSessions().find((session) => session.id === sessionId) ?? null,
+      layout: layoutStore.getLayout(),
+    })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/sessions/:sessionId/input', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    const data = requiredString(body.data, 'data')
+    sessionManager.writeInput({
+      sessionId: request.params.sessionId,
+      data,
+    })
+    response.json({ ok: true })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/sessions/:sessionId/run', (request, response) => {
+  try {
+    const body = asRecord(request.body)
+    const command = requiredString(body.command, 'command')
+    sessionManager.writeInput({
+      sessionId: request.params.sessionId,
+      data: `${command}\r`,
+    })
+    response.json({ ok: true })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.post('/api/sessions/:sessionId/restart', (request, response) => {
+  try {
+    const session = sessionManager.restartSession(request.params.sessionId)
+    response.json({ session })
+  } catch (error) {
+    sendApiError(response, error)
+  }
+})
+
+app.delete('/api/sessions/:sessionId', (request, response) => {
+  try {
+    sessionManager.closeSession({ sessionId: request.params.sessionId })
+    response.json({ ok: true, layout: layoutStore.getLayout() })
+  } catch (error) {
+    sendApiError(response, error)
+  }
 })
 
 if (process.env.NODE_ENV === 'production') {
@@ -102,11 +318,14 @@ io.on('connection', (socket) => {
   socket.emit('session-list', {
     sessions: sessionManager.listSessions(),
   })
+  socket.emit('layout-sync', {
+    layout: layoutStore.getLayout(),
+  } satisfies LayoutSyncPayload)
 
   socket.on(
     'spawn',
     (payload: SpawnSessionPayload | undefined, respond?: (ack: SocketAck<unknown>) => void) => {
-      withAck(respond, () => sessionManager.createSession(payload))
+      withAck(respond, () => createManagedSession(payload ?? {}))
     },
   )
 
@@ -175,8 +394,18 @@ io.on('connection', (socket) => {
 })
 
 httpServer.listen(port, host, () => {
+  void writeRuntimeStateFile()
   console.log(`WebTerm listening on http://${host}:${port}`)
 })
+
+function createManagedSession(payload: SpawnSessionPayload) {
+  const session = sessionManager.createSession(payload)
+  layoutStore.addSessionToWorkspace(session.id, payload.workspaceId, {
+    open: payload.open,
+    focus: payload.focus,
+  })
+  return session
+}
 
 function withAck<T>(respond: ((ack: SocketAck<T>) => void) | undefined, action: () => T) {
   if (!respond) {
@@ -196,6 +425,98 @@ function withAck<T>(respond: ((ack: SocketAck<T>) => void) | undefined, action: 
       error: error instanceof Error ? error.message : 'Unexpected server error.',
     })
   }
+}
+
+function asRecord(value: unknown) {
+  if (typeof value !== 'object' || value === null) {
+    return {}
+  }
+
+  return value as Record<string, unknown>
+}
+
+function optionalString(value: unknown) {
+  return typeof value === 'string' ? value : undefined
+}
+
+function optionalNumber(value: unknown) {
+  return typeof value === 'number' && Number.isInteger(value) ? value : undefined
+}
+
+function optionalBoolean(value: unknown) {
+  return typeof value === 'boolean' ? value : undefined
+}
+
+function requiredString(value: unknown, field: string) {
+  if (typeof value === 'string' && value.length > 0) {
+    return value
+  }
+
+  throw new Error(`"${field}" must be a non-empty string.`)
+}
+
+function requiredStringArray(value: unknown, field: string) {
+  if (Array.isArray(value) && value.every((item) => typeof item === 'string')) {
+    return value
+  }
+
+  throw new Error(`"${field}" must be an array of strings.`)
+}
+
+function parseSpawnPayload(value: unknown): SpawnSessionPayload {
+  const payload = asRecord(value)
+
+  return {
+    shell: optionalShell(payload.shell),
+    customShellPath: optionalString(payload.customShellPath),
+    cwd: optionalString(payload.cwd),
+    title: optionalString(payload.title),
+    workspaceId: optionalString(payload.workspaceId),
+    focus: optionalBoolean(payload.focus),
+    open: optionalBoolean(payload.open),
+    startupCommand: optionalString(payload.startupCommand),
+  }
+}
+
+function optionalShell(value: unknown): SpawnSessionPayload['shell'] {
+  if (
+    value === 'powershell' ||
+    value === 'bash' ||
+    value === 'zsh' ||
+    value === 'cmd' ||
+    value === 'git-bash'
+  ) {
+    return value
+  }
+
+  return undefined
+}
+
+function sendApiError(
+  response: express.Response,
+  error: unknown,
+) {
+  response.status(400).json({
+    error: error instanceof Error ? error.message : 'Unexpected server error.',
+  })
+}
+
+async function writeRuntimeStateFile() {
+  await fs.mkdir(logsDir, { recursive: true })
+  await fs.writeFile(
+    runtimeStateFilePath,
+    JSON.stringify(
+      {
+        host,
+        port,
+        url: `http://${host}:${port}`,
+        pid: process.pid,
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  )
 }
 
 async function findAvailablePort(startPort: number, bindHost: string) {
